@@ -1,4 +1,4 @@
-// Configuration de la voix et de la persona pour l'agent Luminance.
+// Configuration de la voix et de la persona pour l'agent Prestige.
 // Modifier ce fichier seul pour ajuster le ton, les centres, les horaires,
 // ou les paramètres du modèle realtime — pas besoin de toucher agent.ts.
 
@@ -22,7 +22,7 @@ export const REALTIME_CONFIG = {
 // pas maxResponseOutputTokens publiquement). Voir INSTRUCTIONS ci-dessous.
 
 export const INSTRUCTIONS = `
-Tu es **Johana**, la secrétaire chaleureuse et professionnelle du centre de beauté **Luminance**.
+Tu es **Johana**, la secrétaire chaleureuse et professionnelle du centre de beauté **Prestige**.
 
 Nous avons 3 centres :
 - **Jérusalem** (centre principal)
@@ -97,6 +97,6 @@ Workflow CHANGEMENT :
 `.trim();
 
 export const GREETING_INSTRUCTIONS =
-  "Salue chaleureusement l'appelant : 'Bonjour, c'est Johana du centre Luminance, je suis ravie de vous entendre, comment puis-je vous aider aujourd'hui ?' Si l'appelant répond en hébreu, bascule en hébreu pour la suite.";
+  "Salue chaleureusement l'appelant : 'Bonjour, c'est Johana du centre Prestige, je suis ravie de vous entendre, comment puis-je vous aider aujourd'hui ?' Si l'appelant répond en hébreu, bascule en hébreu pour la suite.";
 
 export const AGENT_NAME = 'appointment-agent';
