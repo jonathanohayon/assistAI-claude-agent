@@ -52,14 +52,17 @@ interface TranscriptEntry {
   text: string;
 }
 
-const fetchConfig = async (): Promise<FetchedConfig> => {
+const fetchConfig = async (calledNumber: string): Promise<FetchedConfig> => {
   const appUrl = process.env['APP_URL'];
   if (!appUrl) {
     console.warn('[config] APP_URL not set, using compiled defaults');
     return defaultConfig();
   }
   try {
-    const res = await fetch(`${appUrl}/api/agent/config`, {
+    const url = calledNumber
+      ? `${appUrl}/api/agent/config?phone=${encodeURIComponent(calledNumber)}`
+      : `${appUrl}/api/agent/config`;
+    const res = await fetch(url, {
       signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) {
@@ -92,10 +95,14 @@ const defaultConfig = (): FetchedConfig => ({
   maxResponseTokens: 220,
 });
 
-// POST the recorded transcript + caller's phone to the web service so it can
+// POST the recorded transcript + numbers to the web service so it can
 // summarize and dispatch WhatsApp messages. Best-effort: never throws so a
 // post-call failure can't crash the agent.
-const postCallEnd = async (transcript: TranscriptEntry[], fromNumber: string) => {
+const postCallEnd = async (
+  transcript: TranscriptEntry[],
+  fromNumber: string,
+  toNumber: string,
+) => {
   const appUrl = process.env['APP_URL'];
   const secret = process.env['INTERNAL_SECRET'];
   if (!appUrl || !secret) {
@@ -113,19 +120,48 @@ const postCallEnd = async (transcript: TranscriptEntry[], fromNumber: string) =>
         'Content-Type': 'application/json',
         'x-internal-secret': secret,
       },
-      body: JSON.stringify({ fromNumber, transcript }),
+      body: JSON.stringify({ fromNumber, toNumber, transcript }),
       signal: AbortSignal.timeout(30_000),
     });
     const body = await res.text();
-    console.log(`[recap] /api/calls/end → ${res.status} ${body.slice(0, 200)}`);
+    console.log(
+      `[recap] /api/calls/end → ${res.status} ${body.slice(0, 200)}`,
+    );
   } catch (e) {
     console.error(`[recap] failed: ${(e as Error).message}`);
   }
 };
 
-// SIP participants in LiveKit have identity `sip_+972585001007`.
-const phoneFromSipIdentity = (identity: string): string =>
-  identity.startsWith('sip_') ? identity.slice(4) : '';
+// LiveKit SIP exposes:
+//   sip.phoneNumber       = caller's number (From)
+//   sip.trunkPhoneNumber  = number that was dialed (To, the tenant's line)
+// The participant identity is also `sip_<from>` as a fallback.
+const sipFromOf = (p: { attributes: Record<string, string>; identity: string }): string => {
+  const attr = p.attributes['sip.phoneNumber'];
+  if (attr) return attr;
+  return p.identity.startsWith('sip_') ? p.identity.slice(4) : '';
+};
+const sipToOf = (p: { attributes: Record<string, string> }): string =>
+  p.attributes['sip.trunkPhoneNumber'] ?? '';
+
+// Poll the SIP participant's attributes for the dialed number. LiveKit
+// sets `sip.trunkPhoneNumber` once the participant is published, which can
+// arrive a beat after `connect()` returns. Time-bounded so we never block
+// the call for too long — fall back to default tenant if unset.
+const waitForCalledNumber = async (
+  ctx: JobContext<ProcessUserData>,
+  timeoutMs: number,
+): Promise<string> => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const [, p] of ctx.room.remoteParticipants) {
+      const t = sipToOf(p);
+      if (t) return t;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return '';
+};
 
 export default defineAgent<ProcessUserData>({
   prewarm: async (proc) => {
@@ -139,7 +175,13 @@ export default defineAgent<ProcessUserData>({
 
     await ctx.connect(undefined, AutoSubscribe.SUBSCRIBE_ALL);
 
-    const cfg = await fetchConfig();
+    // Resolve the called number BEFORE fetching config so we can route to
+    // the right tenant. SIP participant attributes arrive shortly after the
+    // room connects — wait briefly for them.
+    const calledNumber = await waitForCalledNumber(ctx, 3_000);
+    console.log(`[tenant] calledNumber=${calledNumber || '(unknown)'}`);
+
+    const cfg = await fetchConfig(calledNumber);
     console.log(
       `[config] using model=${cfg.model} voice=${cfg.voice} temp=${cfg.temperature}`,
     );
@@ -163,16 +205,22 @@ export default defineAgent<ProcessUserData>({
     // ── Transcript capture ──────────────────────────────────────────────
     const transcript: TranscriptEntry[] = [];
     let fromNumber = '';
+    let toNumber = calledNumber;
     let recapSent = false;
 
-    // Pull the SIP caller's number from the connected participant.
-    for (const [, p] of ctx.room.remoteParticipants) {
-      const num = phoneFromSipIdentity(p.identity);
-      if (num) fromNumber = num;
-    }
-    ctx.room.on(RoomEvent.ParticipantConnected, (p) => {
-      const num = phoneFromSipIdentity(p.identity);
-      if (num) fromNumber = num;
+    const captureNumbers = (p: {
+      attributes: Record<string, string>;
+      identity: string;
+    }) => {
+      const f = sipFromOf(p);
+      const t = sipToOf(p);
+      if (f) fromNumber = f;
+      if (t) toNumber = t;
+    };
+    for (const [, p] of ctx.room.remoteParticipants) captureNumbers(p);
+    ctx.room.on(RoomEvent.ParticipantConnected, (p) => captureNumbers(p));
+    ctx.room.on(RoomEvent.ParticipantAttributesChanged, (_changed, p) => {
+      captureNumbers(p);
     });
 
     // Grab final user transcripts as they come in.
@@ -202,11 +250,11 @@ export default defineAgent<ProcessUserData>({
     const triggerRecap = async () => {
       if (recapSent) return;
       recapSent = true;
-      await postCallEnd(transcript, fromNumber);
+      await postCallEnd(transcript, fromNumber, toNumber);
     };
 
     ctx.room.on(RoomEvent.ParticipantDisconnected, (p) => {
-      if (phoneFromSipIdentity(p.identity)) {
+      if (sipFromOf(p)) {
         // Caller hung up. Fire-and-await — the worker stays alive long enough.
         void triggerRecap();
       }
