@@ -3,7 +3,6 @@ import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
 
 // Single source of truth: load the project's .env.local from the repo root.
-// Must run before any module reads process.env.
 loadDotenv({
   path: resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env.local'),
 });
@@ -18,6 +17,7 @@ import {
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
+import { RoomEvent } from '@livekit/rtc-node';
 
 import {
   AGENT_NAME,
@@ -47,10 +47,11 @@ interface FetchedConfig {
   maxResponseTokens: number;
 }
 
-// Fetch the runtime config from the web service. This is what makes the
-// dashboard live: editing in /dashboard updates DB, next call picks it up.
-// Fallback to compiled-in defaults if the web service is unreachable so the
-// agent never goes silent in a dependency outage.
+interface TranscriptEntry {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
 const fetchConfig = async (): Promise<FetchedConfig> => {
   const appUrl = process.env['APP_URL'];
   if (!appUrl) {
@@ -68,8 +69,7 @@ const fetchConfig = async (): Promise<FetchedConfig> => {
     const data = (await res.json()) as Partial<FetchedConfig>;
     return {
       instructions: data.instructions ?? FALLBACK_INSTRUCTIONS,
-      greetingInstructions:
-        data.greetingInstructions ?? FALLBACK_GREETING,
+      greetingInstructions: data.greetingInstructions ?? FALLBACK_GREETING,
       model: data.model ?? REALTIME_CONFIG.model,
       voice: data.voice ?? REALTIME_CONFIG.voice,
       temperature: data.temperature ?? REALTIME_CONFIG.temperature,
@@ -91,6 +91,41 @@ const defaultConfig = (): FetchedConfig => ({
   speed: REALTIME_CONFIG.speed,
   maxResponseTokens: 220,
 });
+
+// POST the recorded transcript + caller's phone to the web service so it can
+// summarize and dispatch WhatsApp messages. Best-effort: never throws so a
+// post-call failure can't crash the agent.
+const postCallEnd = async (transcript: TranscriptEntry[], fromNumber: string) => {
+  const appUrl = process.env['APP_URL'];
+  const secret = process.env['INTERNAL_SECRET'];
+  if (!appUrl || !secret) {
+    console.warn('[recap] APP_URL or INTERNAL_SECRET missing — skipping recap');
+    return;
+  }
+  if (transcript.length === 0) {
+    console.log('[recap] empty transcript — skipping');
+    return;
+  }
+  try {
+    const res = await fetch(`${appUrl}/api/calls/end`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-secret': secret,
+      },
+      body: JSON.stringify({ fromNumber, transcript }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await res.text();
+    console.log(`[recap] /api/calls/end → ${res.status} ${body.slice(0, 200)}`);
+  } catch (e) {
+    console.error(`[recap] failed: ${(e as Error).message}`);
+  }
+};
+
+// SIP participants in LiveKit have identity `sip_+972585001007`.
+const phoneFromSipIdentity = (identity: string): string =>
+  identity.startsWith('sip_') ? identity.slice(4) : '';
 
 export default defineAgent<ProcessUserData>({
   prewarm: async (proc) => {
@@ -123,6 +158,61 @@ export default defineAgent<ProcessUserData>({
           model: REALTIME_CONFIG.transcriptionModel,
         },
       }),
+    });
+
+    // ── Transcript capture ──────────────────────────────────────────────
+    const transcript: TranscriptEntry[] = [];
+    let fromNumber = '';
+    let recapSent = false;
+
+    // Pull the SIP caller's number from the connected participant.
+    for (const [, p] of ctx.room.remoteParticipants) {
+      const num = phoneFromSipIdentity(p.identity);
+      if (num) fromNumber = num;
+    }
+    ctx.room.on(RoomEvent.ParticipantConnected, (p) => {
+      const num = phoneFromSipIdentity(p.identity);
+      if (num) fromNumber = num;
+    });
+
+    // Grab final user transcripts as they come in.
+    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
+      if (!ev.isFinal) return;
+      const text = (ev.transcript ?? '').trim();
+      if (text) transcript.push({ role: 'user', text });
+    });
+
+    // Grab assistant messages once committed to the chat history.
+    session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
+      const item = ev.item as {
+        type?: string;
+        role?: string;
+        content?: Array<unknown>;
+      };
+      if (item?.type !== 'message' || item.role !== 'assistant') return;
+      const text = (item.content ?? [])
+        .map((c) => (typeof c === 'string' ? c : ''))
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      if (text) transcript.push({ role: 'assistant', text });
+    });
+
+    // ── End-of-call recap ───────────────────────────────────────────────
+    const triggerRecap = async () => {
+      if (recapSent) return;
+      recapSent = true;
+      await postCallEnd(transcript, fromNumber);
+    };
+
+    ctx.room.on(RoomEvent.ParticipantDisconnected, (p) => {
+      if (phoneFromSipIdentity(p.identity)) {
+        // Caller hung up. Fire-and-await — the worker stays alive long enough.
+        void triggerRecap();
+      }
+    });
+    ctx.room.on(RoomEvent.Disconnected, () => {
+      void triggerRecap();
     });
 
     class JohanaAgent extends voice.Agent {
