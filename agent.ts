@@ -297,10 +297,17 @@ export default defineAgent<ProcessUserData>({
       tools: calendarTools,
     });
 
+    // Wait until the session actually emits Close (caller hung up). Note:
+    // session.start() resolves as soon as the session is wired up, not when
+    // the call ends — so we register a one-shot Close listener up front.
+    const sessionClosed = new Promise<void>((resolve) => {
+      session.once(voice.AgentSessionEventTypes.Close, () => resolve());
+    });
+
     try {
       await session.start({ agent, room: ctx.room });
+      await sessionClosed;
     } finally {
-      // Last chance to ship the recap before the worker process exits.
       console.log(
         `[recap] session ended, transcript=${transcript.length} entries, from=${fromNumber}, to=${toNumber}`,
       );
