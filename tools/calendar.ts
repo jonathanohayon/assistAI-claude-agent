@@ -17,49 +17,83 @@ const post = async <T>(path: string, body: unknown): Promise<T> => {
   return (await res.json()) as T;
 };
 
+// Centers a tenant operates (current = Prestige). Each day of the week is
+// bound to ONE centre on the server side — this enum is exposed to the LLM
+// so it commits to a centre when querying or booking.
+const CENTER_ENUM = z.enum(['jerusalem', 'ashdod', 'natanya']);
+
 export const checkAvailability = llm.tool({
   description:
-    "Vérifie les créneaux disponibles dans le calendrier pour une date donnée.",
+    "Vérifie les créneaux disponibles. Le centre ouvert dépend du jour : LUNDI=Ashdod, MERCREDI=Natanya, autres jours=Jérusalem. Si tu indiques un centre qui ne correspond pas au jour demandé, l'API te dira lequel est ouvert.",
   parameters: z.object({
     date: z.string().describe("Date au format YYYY-MM-DD (ex: 2026-05-12)."),
+    center: CENTER_ENUM.nullish().describe(
+      "Centre demandé par la cliente. Optionnel — laisse vide pour laisser l'API déterminer le centre du jour.",
+    ),
   }),
-  execute: async ({ date }) => {
-    const data = await post<{ date: string; available_slots: string[] }>(
-      '/api/calendar/availability',
-      { date },
-    );
+  execute: async ({ date, center }) => {
+    const data = await post<{
+      date: string;
+      center: string;
+      label: string;
+      available_slots: string[];
+      reason?: string;
+    }>('/api/calendar/availability', {
+      date,
+      center: center ?? undefined,
+    });
+    if (data.reason) {
+      return `${data.reason} Veux-tu un créneau à ${data.label} le ${date} ?`;
+    }
     const slots = data.available_slots ?? [];
-    if (slots.length === 0) return `Aucun créneau disponible le ${date}.`;
-    return `Créneaux disponibles le ${date} : ${slots.join(', ')}`;
+    if (slots.length === 0) return `Aucun créneau disponible le ${date} à ${data.label}.`;
+    return `Le ${date} (centre ${data.label}), créneaux libres : ${slots.join(', ')}`;
   },
 });
 
 export const bookAppointment = llm.tool({
   description:
-    "Réserve un rendez-vous dans Google Calendar. Demande nom, téléphone, date, heure avant d'appeler.",
+    "Réserve un rendez-vous dans Google Calendar. AVANT d'appeler : prénom, téléphone, date, heure, prestation, et déduis le centre depuis la date (LUNDI=Ashdod, MERCREDI=Natanya, autres jours=Jérusalem). L'API rejettera la réservation si le centre ne correspond pas au jour.",
   parameters: z.object({
     name: z.string().describe("Nom complet du client."),
     phone: z.string().describe("Numéro de téléphone."),
     date: z.string().describe("Date au format YYYY-MM-DD."),
     time: z.string().describe("Heure au format HH:MM (24h)."),
-    description: z.string().nullish().describe("Objet du rendez-vous (ex: 'coupe', 'couleur')."),
+    center: CENTER_ENUM.describe(
+      "Centre obligatoire — déduis-le du jour de la semaine : LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem.",
+    ),
+    description: z.string().nullish().describe("Objet du rendez-vous (ex: 'soin du visage', 'épilation')."),
     email: z.string().nullish().describe("Email du client (optionnel)."),
-    duration: z.number().int().nullish().describe("Durée en minutes (défaut 30)."),
+    duration: z
+      .number()
+      .int()
+      .nullish()
+      .describe("Durée en minutes (60 pour soins de la peau, 30 pour épilation, défaut 30)."),
   }),
-  execute: async ({ name, phone, date, time, description, email, duration }) => {
-    const data = await post<{ success?: boolean; summary?: string; error?: string }>(
-      '/api/calendar/book',
-      {
-        name,
-        phone,
-        date,
-        time,
-        description: description ?? undefined,
-        email: email ?? undefined,
-        duration: duration ?? 30,
-      },
-    );
-    if (!data.success) return `Erreur réservation : ${data.error ?? 'inconnue'}`;
+  execute: async ({ name, phone, date, time, center, description, email, duration }) => {
+    const data = await post<{
+      success?: boolean;
+      summary?: string;
+      error?: string;
+      expectedLabel?: string;
+    }>('/api/calendar/book', {
+      name,
+      phone,
+      date,
+      time,
+      center,
+      description: description ?? undefined,
+      email: email ?? undefined,
+      duration: duration ?? 30,
+    });
+    if (!data.success) {
+      // The API may have suggested the right centre — surface it so the LLM
+      // can apologize and re-propose.
+      if (data.expectedLabel) {
+        return `${data.error} (Le bon centre pour le ${date} est ${data.expectedLabel}.)`;
+      }
+      return `Erreur réservation : ${data.error ?? 'inconnue'}`;
+    }
 
     // Auto-save contact to CRM (Sheet). Non-blocking: log but don't fail the booking.
     const notes = `RDV ${date} ${time}${description ? ` — ${description}` : ''}`;
