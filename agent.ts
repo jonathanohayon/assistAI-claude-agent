@@ -95,6 +95,35 @@ const defaultConfig = (): FetchedConfig => ({
   maxResponseTokens: 220,
 });
 
+// Push a structured event to the web service's central log. Best-effort:
+// failures are swallowed so logging never breaks the call. Mirrors locally
+// to stdout in case the network call fails.
+const remoteLog = async (
+  source: string,
+  event: string,
+  message: string,
+  level: 'info' | 'warn' | 'error' = 'info',
+  metadata: Record<string, unknown> = {},
+): Promise<void> => {
+  console.log(`[${source}:${event}]`, message, metadata);
+  const appUrl = process.env['APP_URL'];
+  const secret = process.env['INTERNAL_SECRET'];
+  if (!appUrl || !secret) return;
+  try {
+    await fetch(`${appUrl}/api/events`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-secret': secret,
+      },
+      body: JSON.stringify({ source, event, message, level, metadata }),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    /* ignore */
+  }
+};
+
 // POST the recorded transcript + numbers to the web service so it can
 // summarize and dispatch WhatsApp messages. Best-effort: never throws so a
 // post-call failure can't crash the agent.
@@ -179,11 +208,21 @@ export default defineAgent<ProcessUserData>({
     // the right tenant. SIP participant attributes arrive shortly after the
     // room connects — wait briefly for them.
     const calledNumber = await waitForCalledNumber(ctx, 3_000);
-    console.log(`[tenant] calledNumber=${calledNumber || '(unknown)'}`);
+    await remoteLog(
+      'agent',
+      'call_started',
+      `Appel reçu sur ${calledNumber || '(numéro inconnu)'}`,
+      'info',
+      { calledNumber, roomName: ctx.room.name },
+    );
 
     const cfg = await fetchConfig(calledNumber);
-    console.log(
-      `[config] using model=${cfg.model} voice=${cfg.voice} temp=${cfg.temperature}`,
+    await remoteLog(
+      'agent',
+      'config_loaded',
+      `Config chargée : ${cfg.model} / ${cfg.voice} / t°${cfg.temperature}`,
+      'info',
+      { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
     );
 
     const session = new voice.AgentSession({
@@ -308,8 +347,16 @@ export default defineAgent<ProcessUserData>({
       await session.start({ agent, room: ctx.room });
       await sessionClosed;
     } finally {
-      console.log(
-        `[recap] session ended, transcript=${transcript.length} entries, from=${fromNumber}, to=${toNumber}`,
+      await remoteLog(
+        'agent',
+        'call_ended',
+        `Appel terminé · ${transcript.length} entries · from=${fromNumber || '?'} to=${toNumber || '?'}`,
+        'info',
+        {
+          transcriptEntries: transcript.length,
+          fromNumber,
+          toNumber,
+        },
       );
       await triggerRecap();
     }
