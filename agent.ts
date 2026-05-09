@@ -223,27 +223,53 @@ export default defineAgent<ProcessUserData>({
       captureNumbers(p);
     });
 
-    // Grab final user transcripts as they come in.
+    // Extract plain text from a ChatMessage content[] entry. Realtime models
+    // emit objects like { type: 'audio', transcript: '...' } or
+    // { type: 'text', text: '...' } rather than raw strings, so we probe the
+    // common fields before giving up.
+    const extractText = (content: unknown): string => {
+      if (!content) return '';
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        return content.map(extractText).filter(Boolean).join(' ').trim();
+      }
+      if (typeof content === 'object') {
+        const obj = content as Record<string, unknown>;
+        for (const key of ['transcript', 'text', 'content']) {
+          const v = obj[key];
+          if (typeof v === 'string' && v.trim()) return v;
+          if (Array.isArray(v)) {
+            const joined = extractText(v);
+            if (joined) return joined;
+          }
+        }
+      }
+      return '';
+    };
+
+    // Belt & braces: realtime models commit final user turns via
+    // ConversationItemAdded too, but UserInputTranscribed is the canonical
+    // STT-style event. Keep both, dedupe by skipping empty text.
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
       if (!ev.isFinal) return;
       const text = (ev.transcript ?? '').trim();
       if (text) transcript.push({ role: 'user', text });
     });
 
-    // Grab assistant messages once committed to the chat history.
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
       const item = ev.item as {
         type?: string;
         role?: string;
-        content?: Array<unknown>;
+        content?: unknown;
       };
-      if (item?.type !== 'message' || item.role !== 'assistant') return;
-      const text = (item.content ?? [])
-        .map((c) => (typeof c === 'string' ? c : ''))
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-      if (text) transcript.push({ role: 'assistant', text });
+      if (item?.type !== 'message') return;
+      if (item.role !== 'assistant' && item.role !== 'user') return;
+      const text = extractText(item.content);
+      if (!text) return;
+      // Dedupe vs the parallel UserInputTranscribed stream.
+      const last = transcript[transcript.length - 1];
+      if (last && last.role === item.role && last.text === text) return;
+      transcript.push({ role: item.role as 'user' | 'assistant', text });
     });
 
     // ── End-of-call recap ───────────────────────────────────────────────
