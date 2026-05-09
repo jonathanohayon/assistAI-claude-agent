@@ -13,11 +13,13 @@ import {
   WorkerOptions,
   cli,
   defineAgent,
+  llm,
   voice,
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
 import { RoomEvent } from '@livekit/rtc-node';
+import { z } from 'zod';
 
 import {
   AGENT_NAME,
@@ -26,6 +28,12 @@ import {
   REALTIME_CONFIG,
 } from './config.js';
 import { calendarTools } from './tools/calendar.js';
+
+// Inactivity threshold before the agent hangs up by itself.
+const SILENCE_HANGUP_MS = 8_000;
+// Delay between an LLM-triggered end_call and the actual close, to let the
+// agent's goodbye audio finish playing on the caller's side.
+const END_CALL_GRACE_MS = 1_500;
 
 type ProcessUserData = {
   vad?: silero.VAD;
@@ -318,10 +326,73 @@ export default defineAgent<ProcessUserData>({
       await postCallEnd(transcript, fromNumber, toNumber);
     };
 
-    // We don't fire-and-forget on disconnect events because the worker can
-    // tear down before the HTTP POST completes. Instead, wait for the
-    // session to end naturally (session.start awaits until the room shuts
-    // down) then await the recap inline below.
+    // ── Auto-hangup ─────────────────────────────────────────────────────
+    // Two triggers:
+    //   1. The LLM calls the `end_call` tool when the conversation is done.
+    //   2. No activity (user speech / agent speech / tool execution) for
+    //      SILENCE_HANGUP_MS — the call is dead, hang up.
+    let lastActivity = Date.now();
+    let closing = false;
+    const resetActivity = () => {
+      lastActivity = Date.now();
+    };
+    const closeSession = async (reason: string) => {
+      if (closing) return;
+      closing = true;
+      await remoteLog(
+        'agent',
+        'auto_hangup',
+        `Hangup auto: ${reason}`,
+        'info',
+        { reason, transcriptEntries: transcript.length },
+      );
+      try {
+        await session.close();
+      } catch (e) {
+        console.warn('[hangup] session.close threw:', (e as Error).message);
+      }
+    };
+
+    // Reset on any activity that means "the call is alive".
+    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, resetActivity);
+    session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
+      if ((ev as { newState?: string }).newState === 'speaking') {
+        resetActivity();
+      }
+    });
+    session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
+      const next = (ev as { newState?: string }).newState;
+      if (next === 'speaking' || next === 'thinking') resetActivity();
+    });
+
+    const silenceWatcher = setInterval(() => {
+      if (closing) return;
+      if (Date.now() - lastActivity > SILENCE_HANGUP_MS) {
+        clearInterval(silenceWatcher);
+        void closeSession(`silence_${SILENCE_HANGUP_MS}ms`);
+      }
+    }, 1_000);
+
+    // ── end_call tool — exposed to the LLM ──────────────────────────────
+    const endCallTool = llm.tool({
+      description:
+        "Termine l'appel proprement. À appeler UNIQUEMENT après avoir dit au revoir, quand la conversation est conclue (RDV pris/annulé/déplacé, info donnée et plus rien à demander, ou client a explicitement raccroché verbalement). Ne PAS appeler en plein milieu d'un échange.",
+      parameters: z.object({
+        reason: z
+          .string()
+          .nullish()
+          .describe(
+            "Raison courte du raccroché : 'rdv_pris', 'rdv_annulé', 'info_donnée', 'client_raccroche', etc.",
+          ),
+      }),
+      execute: async ({ reason }) => {
+        const r = (reason ?? 'llm_end').trim() || 'llm_end';
+        // Delay a beat so the agent's farewell speech finishes playing
+        // before we tear down the audio path.
+        setTimeout(() => void closeSession(`tool:${r}`), END_CALL_GRACE_MS);
+        return 'Au revoir.';
+      },
+    });
 
     class JohanaAgent extends voice.Agent {
       override async onEnter(): Promise<void> {
@@ -333,12 +404,12 @@ export default defineAgent<ProcessUserData>({
 
     const agent = new JohanaAgent({
       instructions: cfg.instructions,
-      tools: calendarTools,
+      tools: { ...calendarTools, end_call: endCallTool },
     });
 
-    // Wait until the session actually emits Close (caller hung up). Note:
-    // session.start() resolves as soon as the session is wired up, not when
-    // the call ends — so we register a one-shot Close listener up front.
+    // Wait until the session actually emits Close (caller hung up OR we
+    // closed it ourselves via end_call/silence). session.start() resolves
+    // on setup, NOT on call end — register the one-shot Close listener now.
     const sessionClosed = new Promise<void>((resolve) => {
       session.once(voice.AgentSessionEventTypes.Close, () => resolve());
     });
@@ -347,6 +418,7 @@ export default defineAgent<ProcessUserData>({
       await session.start({ agent, room: ctx.room });
       await sessionClosed;
     } finally {
+      clearInterval(silenceWatcher);
       await remoteLog(
         'agent',
         'call_ended',
