@@ -253,15 +253,10 @@ export default defineAgent<ProcessUserData>({
       await postCallEnd(transcript, fromNumber, toNumber);
     };
 
-    ctx.room.on(RoomEvent.ParticipantDisconnected, (p) => {
-      if (sipFromOf(p)) {
-        // Caller hung up. Fire-and-await — the worker stays alive long enough.
-        void triggerRecap();
-      }
-    });
-    ctx.room.on(RoomEvent.Disconnected, () => {
-      void triggerRecap();
-    });
+    // We don't fire-and-forget on disconnect events because the worker can
+    // tear down before the HTTP POST completes. Instead, wait for the
+    // session to end naturally (session.start awaits until the room shuts
+    // down) then await the recap inline below.
 
     class JohanaAgent extends voice.Agent {
       override async onEnter(): Promise<void> {
@@ -276,7 +271,15 @@ export default defineAgent<ProcessUserData>({
       tools: calendarTools,
     });
 
-    await session.start({ agent, room: ctx.room });
+    try {
+      await session.start({ agent, room: ctx.room });
+    } finally {
+      // Last chance to ship the recap before the worker process exits.
+      console.log(
+        `[recap] session ended, transcript=${transcript.length} entries, from=${fromNumber}, to=${toNumber}`,
+      );
+      await triggerRecap();
+    }
   },
 });
 
