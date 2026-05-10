@@ -466,17 +466,26 @@ Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
       internalSecret,
     });
 
-    // Inject the caller's number (when known) so the LLM doesn't ask the
-    // customer for a phone they're already calling from. Withheld/private
-    // numbers leave fromNumber empty → no hint → LLM asks like before.
+    // Inject the caller's number (when known) so the LLM proposes it for
+    // confirmation instead of asking blind. We don't blindly trust it —
+    // sometimes a customer calls from a relative's phone, so the LLM must
+    // confirm before using it. Withheld/private numbers leave fromNumber
+    // empty → no hint → LLM asks like before.
     const callerHint = fromNumber
       ? `
 
 ──────────────────────────────────────────
-**NUMÉRO DU CLIENT (déjà connu via l'appel)**
-Le client t'appelle depuis le numéro \`${fromNumber}\`. Quand un tool a besoin du champ \`phone\` (par ex. \`book_appointment\`, \`save_contact\`), utilise CE numéro directement — ne demande PAS son numéro à la cliente, c'est inutile et ça donne mauvaise impression.
+**NUMÉRO DU CLIENT (détecté via l'appel)**
+Le numéro qui appelle est : \`${fromNumber}\`.
 
-Exception : si la cliente te dit spontanément qu'elle veut être contactée sur un AUTRE numéro, utilise celui-là à la place.
+Avant d'utiliser ce numéro pour un tool (\`book_appointment\`, \`save_contact\`, etc.), CONFIRME-le avec la cliente — formule courte du genre :
+  « Je note le rendez-vous au numéro qui appelle, le \`${fromNumber}\`, c'est bien le bon ? »
+ou en hébreu : « אני רושמת את התור על המספר שממנו את מתקשרת, \`${fromNumber}\`, נכון? »
+
+- Si elle confirme → utilise \`${fromNumber}\` dans le champ \`phone\`.
+- Si elle te donne un AUTRE numéro (elle appelle depuis le tel de sa mère, du bureau, etc.) → utilise celui qu'elle te dicte.
+
+Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${fromNumber}\` pour confirmation d'abord, ça gagne du temps.
 ──────────────────────────────────────────`
       : '';
 
