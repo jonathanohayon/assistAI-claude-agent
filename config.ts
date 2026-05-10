@@ -5,11 +5,11 @@
 export const REALTIME_CONFIG = {
   model: process.env['REALTIME_MODEL'] ?? 'gpt-realtime-mini',
   voice: process.env['REALTIME_VOICE'] ?? 'marin',
-  // gpt-4o-mini-transcribe handles multilingual auto-detection MUCH better
-  // than whisper-1 — whisper would mis-transcribe Hebrew as French gibberish
-  // when the session was warm on French, breaking the language switch.
+  // gpt-realtime-whisper : modèle de transcription dédié au Realtime API
+  // (meilleur multilingue HE/FR/EN que whisper-1, tuned pour faible latence
+  // streaming). Override par REALTIME_TRANSCRIPTION_MODEL si OpenAI rename.
   transcriptionModel:
-    process.env['REALTIME_TRANSCRIPTION_MODEL'] ?? 'gpt-4o-mini-transcribe',
+    process.env['REALTIME_TRANSCRIPTION_MODEL'] ?? 'gpt-realtime-whisper',
   apiBase: process.env['REALTIME_API_BASE'] ?? 'https://api.openai.com/v1',
 
   // Personnalité
