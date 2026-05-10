@@ -466,6 +466,74 @@ Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
       internalSecret,
     });
 
+    // Current date/time in Jerusalem — injected so the LLM can resolve
+    // relative dates ("demain", "lundi prochain") correctly. Without this,
+    // the realtime model has zero clock awareness and either hallucinates
+    // or asks. Date is in French long form for natural reading.
+    const nowJerusalem = (() => {
+      const d = new Date();
+      const dateFr = new Intl.DateTimeFormat('fr-FR', {
+        timeZone: 'Asia/Jerusalem',
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      }).format(d);
+      const time = new Intl.DateTimeFormat('fr-FR', {
+        timeZone: 'Asia/Jerusalem',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(d);
+      const isoDate = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Jerusalem',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d); // YYYY-MM-DD
+      return { dateFr, time, isoDate };
+    })();
+
+    const dateContextBlock = `
+
+──────────────────────────────────────────
+**CONTEXTE TEMPOREL (Asia/Jerusalem)**
+- Aujourd'hui : ${nowJerusalem.dateFr} (\`${nowJerusalem.isoDate}\`)
+- Heure locale : ${nowJerusalem.time}
+- Fuseau de référence : Asia/Jerusalem (toutes les dates et heures que tu manipules sont dans ce fuseau)
+
+Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → calcule la date YYYY-MM-DD à partir d'aujourd'hui ci-dessus AVANT d'appeler un tool. Ne demande JAMAIS la date complète à la cliente, ce serait étrange ("c'est quel jour aujourd'hui ?").
+──────────────────────────────────────────`;
+
+    // Hard-coded directive on how to PRONOUNCE times to the customer.
+    // The realtime TTS reads "09:00" literally as "zéro neuf zéro zéro" —
+    // unnatural. We instruct it to convert to spoken French/Hebrew before
+    // speaking, while keeping HH:MM in the tool args.
+    const SPOKEN_TIME_DIRECTIVE = `
+
+──────────────────────────────────────────
+**PRONONCIATION DES HEURES — IMPORTANT**
+Quand tu lis une heure à VOIX HAUTE à la cliente, formate-la naturellement. NE LIS JAMAIS le format \`HH:MM\` littéral, ça donne "zéro neuf zéro zéro" — c'est moche.
+
+En français :
+- \`09:00\` → "neuf heures" (ou "neuf heures du matin" si ambigu)
+- \`09:30\` → "neuf heures et demie" ou "neuf heures trente"
+- \`10:15\` → "dix heures et quart"
+- \`11:45\` → "midi moins le quart"
+- \`12:00\` → "midi"
+- \`12:30\` → "midi et demi"
+- \`13:00\` → "treize heures" ou "une heure de l'après-midi"
+- \`18:00\` → "six heures du soir" ou "dix-huit heures"
+
+En hébreu :
+- \`09:00\` → "תשע בבוקר"
+- \`09:30\` → "תשע וחצי"
+- \`12:00\` → "שתים-עשרה בצהריים"
+- \`18:00\` → "שש בערב"
+
+Quand tu PASSES une heure à un tool (\`book_appointment\`, etc.), garde le format \`HH:MM\` dans les arguments — c'est uniquement la prononciation orale qui change.
+──────────────────────────────────────────`;
+
     // Inject the caller's number (when known) so the LLM proposes it for
     // confirmation instead of asking blind. We don't blindly trust it —
     // sometimes a customer calls from a relative's phone, so the LLM must
@@ -490,7 +558,12 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${fro
       : '';
 
     const agent = new TenantAgent({
-      instructions: cfg.instructions + HANGUP_DIRECTIVE + callerHint,
+      instructions:
+        cfg.instructions +
+        dateContextBlock +
+        SPOKEN_TIME_DIRECTIVE +
+        HANGUP_DIRECTIVE +
+        callerHint,
       tools: { ...calendarTools, end_call: endCallTool },
     });
 
