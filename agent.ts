@@ -309,7 +309,18 @@ export default defineAgent<ProcessUserData>({
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
       if (!ev.isFinal) return;
       const text = (ev.transcript ?? '').trim();
-      if (text) transcript.push({ role: 'user', text });
+      if (!text) return;
+      transcript.push({ role: 'user', text });
+      // Cheap charset-based language sniff: log the dominant script so we
+      // can verify after the fact that Hebrew turns are transcribed as
+      // Hebrew, not as French gibberish (whisper-1 used to do that).
+      const hebrewChars = (text.match(/[֐-׿]/g) ?? []).length;
+      const latinChars = (text.match(/[A-Za-zÀ-ÿ]/g) ?? []).length;
+      const langSniff =
+        hebrewChars > latinChars ? 'he' : latinChars > 0 ? 'lat' : '?';
+      console.log(
+        `[lang_sniff] user turn: ${langSniff} | "${text.slice(0, 60)}"`,
+      );
     });
 
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
