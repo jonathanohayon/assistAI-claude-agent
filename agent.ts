@@ -36,9 +36,14 @@ import { makeCalendarTools } from './tools/calendar.js';
 // them off, but short enough that a stale call doesn't linger forever.
 // Override via SILENCE_HANGUP_MS env var.
 const SILENCE_HANGUP_MS = Number(process.env['SILENCE_HANGUP_MS'] ?? 30_000);
-// Delay between an LLM-triggered end_call and the actual close, to let the
-// agent's goodbye audio finish playing on the caller's side.
-const END_CALL_GRACE_MS = 1_500;
+// Hard-cap delay between an LLM-triggered end_call and the actual close.
+// We normally wait for the agent's "speaking → idle/listening" transition
+// (= goodbye audio finished). This is a safety net if that event never
+// fires (tool call without speech, stuck state, etc.).
+const END_CALL_HARD_CAP_MS = 8_000;
+// Min hold after the goodbye finishes streaming, to flush the last frames
+// of audio over the SIP RTP buffer to the caller.
+const END_CALL_TRAILING_MS = 600;
 // Grace period at the start of the call before the silence watchdog kicks
 // in. The customer might pause briefly after the greeting; we don't want to
 // pre-empt them.
@@ -439,9 +444,43 @@ export default defineAgent<ProcessUserData>({
       }),
       execute: async ({ reason }) => {
         const r = (reason ?? 'llm_end').trim() || 'llm_end';
-        // Delay a beat so the agent's farewell speech finishes playing
-        // before we tear down the audio path.
-        setTimeout(() => void closeSession(`tool:${r}`), END_CALL_GRACE_MS);
+        // Don't close immediately — the LLM emits the tool call AT THE
+        // SAME TIME as the goodbye audio. Wait for the agent state to
+        // transition out of "speaking" (audio actually streamed), then
+        // hold a small trailing window for the SIP RTP buffer to drain.
+        // Hard cap is a safety net.
+        let closed = false;
+        const finish = (cause: string) => {
+          if (closed) return;
+          closed = true;
+          setTimeout(
+            () => void closeSession(`tool:${r}|${cause}`),
+            END_CALL_TRAILING_MS,
+          );
+        };
+        const stateHandler = (ev: {
+          newState?: voice.AgentState;
+          oldState?: voice.AgentState;
+        }) => {
+          if (
+            ev.oldState === 'speaking' &&
+            (ev.newState === 'listening' || ev.newState === 'idle')
+          ) {
+            session.off(
+              voice.AgentSessionEventTypes.AgentStateChanged,
+              stateHandler,
+            );
+            finish('speech_done');
+          }
+        };
+        session.on(voice.AgentSessionEventTypes.AgentStateChanged, stateHandler);
+        setTimeout(() => {
+          session.off(
+            voice.AgentSessionEventTypes.AgentStateChanged,
+            stateHandler,
+          );
+          finish('hard_cap');
+        }, END_CALL_HARD_CAP_MS);
         return 'Au revoir.';
       },
     });
