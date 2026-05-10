@@ -418,8 +418,26 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
+    // Hard-coded suffix appended to every tenant's instructions. The realtime
+    // model often forgets to invoke end_call after a polite goodbye; this
+    // section is short, prescriptive, and always present so the LLM knows
+    // exactly when and how to hang up.
+    const HANGUP_DIRECTIVE = `
+
+──────────────────────────────────────────
+**RÈGLE DE FIN D'APPEL — OBLIGATOIRE**
+Quand la conversation est CLAIREMENT terminée — la cliente a dit "au revoir / merci / à bientôt / shalom", OU le RDV est pris et elle n'a plus rien à ajouter, OU elle a raccroché verbalement — tu DOIS :
+
+1. Dire ta phrase de clôture chaleureuse ("Au revoir Sarah, à très vite !")
+2. **Immédiatement** après, appeler le tool \`end_call\` avec un argument \`reason\` court (\`rdv_pris\`, \`rdv_annulé\`, \`info_donnée\`, \`client_raccroche\`, etc.)
+
+Ne JAMAIS attendre que la cliente raccroche elle-même — c'est ton rôle de clôturer la ligne. Si tu oublies d'appeler end_call, la cliente reste connectée pour rien et continue de payer la communication.
+
+Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
+──────────────────────────────────────────`;
+
     const agent = new JohanaAgent({
-      instructions: cfg.instructions,
+      instructions: cfg.instructions + HANGUP_DIRECTIVE,
       tools: { ...calendarTools, end_call: endCallTool },
     });
 
