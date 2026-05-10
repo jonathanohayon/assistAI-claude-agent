@@ -410,12 +410,15 @@ export default defineAgent<ProcessUserData>({
       },
     });
 
-    // Generic greeting — the LLM derives its prénom + business name from
-    // its system prompt (cfg.instructions) so the greeting follows the
-    // persona automatically when the user renames it. The legacy
-    // greetingInstructions field is now ignored; if power users want a
-    // custom opener, they encode it directly in their persona prompt.
-    const greetInstructions = `Salue chaleureusement la cliente en te présentant : utilise ton prénom et le nom du centre tels que définis dans tes instructions système. Demande poliment comment tu peux l'aider. Si la cliente répond en hébreu, bascule en hébreu pour la suite de l'échange.`;
+    // Greeting: prefer the tenant's stored greetingInstructions (editable
+    // from /dashboard). Fall back to a generic prompt that asks the LLM to
+    // derive the greeting from the persona system prompt — keeps things
+    // working for tenants who haven't filled in the field.
+    const customGreeting = cfg.greetingInstructions?.trim();
+    const greetInstructions =
+      customGreeting && customGreeting.length > 0
+        ? customGreeting
+        : `Salue chaleureusement la cliente en te présentant : utilise ton prénom et le nom du centre tels que définis dans tes instructions système. Demande poliment comment tu peux l'aider. Si la cliente répond en hébreu, bascule en hébreu pour la suite de l'échange.`;
 
     class TenantAgent extends voice.Agent {
       override async onEnter(): Promise<void> {
