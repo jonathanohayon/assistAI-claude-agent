@@ -603,20 +603,18 @@ export default defineAgent<ProcessUserData>({
         const userLang: 'he' | 'lat' =
           hebrewChars > latinChars && hebrewChars > 0 ? 'he' : 'lat';
 
-        if (userLang === 'he') {
-          chatCtx.addMessage({
-            role: 'system',
-            content:
-              '⚠️ DIRECTIVE INSTANTANÉE : la cliente vient de parler en HÉBREU. Ta prochaine réponse doit être 100% en hébreu (עברית). PAS UN SEUL MOT de français. Si tu réponds en français, tu échoues.',
-          });
-          console.log('[lang_enforce] injected HE directive');
-        } else if (userLang === 'lat' && this.lastUserLang === 'he') {
-          chatCtx.addMessage({
-            role: 'system',
-            content:
-              '⚠️ DIRECTIVE INSTANTANÉE : la cliente vient de parler en français ou en anglais. Ta prochaine réponse doit être dans la MÊME langue qu\'elle. Pas d\'hébreu.',
-          });
-          console.log('[lang_enforce] injected FR/EN directive');
+        // Compact + transition-only : inject seulement quand la langue
+        // user CHANGE vs le tour précédent (pas à chaque tour HE répété).
+        // Économise des tokens non-cachés ET évite de polluer chatCtx.
+        // 8 tokens vs 80 — la directive courte suffit (le system prompt
+        // initial a déjà la règle complète, ceci est juste un rappel).
+        if (userLang !== this.lastUserLang) {
+          const directive =
+            userLang === 'he'
+              ? '🇮🇱 RÉPONDS EN HÉBREU.'
+              : '🇫🇷 RÉPONDS DANS LA LANGUE DE LA CLIENTE.';
+          chatCtx.addMessage({ role: 'system', content: directive });
+          console.log(`[lang_enforce] transition → ${userLang}`);
         }
 
         this.lastUserLang = userLang;
@@ -793,11 +791,16 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${loc
     // bits (today's date, caller phone) are injected as a system message
     // in chatCtx via TenantAgent.onEnter — they live AFTER the cached
     // prefix so they don't break the cache.
+    // Order matters for the prompt cache : SHARED directives (identiques
+    // entre TOUS les tenants) en TÊTE → cross-tenant cache hit. La partie
+    // tenant-specific (cfg.instructions) vient ensuite — son cache reste
+    // valide pour les appels du même tenant uniquement, mais le préfixe
+    // shared est cacheable globalement quand on aura plusieurs salons.
     const STATIC_INSTRUCTIONS =
-      cfg.instructions +
       SPOKEN_TIME_DIRECTIVE +
       SPOKEN_PHONE_DIRECTIVE +
-      HANGUP_DIRECTIVE;
+      HANGUP_DIRECTIVE +
+      cfg.instructions;
     const PER_CALL_CONTEXT = dateContextBlock + callerHint;
 
     const agent = new TenantAgent({
