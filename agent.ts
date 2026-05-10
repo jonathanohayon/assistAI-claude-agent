@@ -27,7 +27,7 @@ import {
   INSTRUCTIONS as FALLBACK_INSTRUCTIONS,
   REALTIME_CONFIG,
 } from './config.js';
-import { calendarTools } from './tools/calendar.js';
+import { makeCalendarTools } from './tools/calendar.js';
 
 // Inactivity threshold before the agent hangs up by itself.
 // 30s = enough for a customer to think mid-conversation without us cutting
@@ -442,6 +442,26 @@ Ne JAMAIS attendre que la cliente raccroche elle-même — c'est ton rôle de cl
 
 Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
 ──────────────────────────────────────────`;
+
+    // Bind the calendar/sheets tools to THIS tenant's dialed number so they
+    // hit the right Google Calendar/Sheet on the web service. Without this,
+    // the routes fall back to the admin's credentials (= cross-tenant leak).
+    const internalSecret = process.env['INTERNAL_SECRET'] ?? '';
+    if (!internalSecret) {
+      console.warn(
+        '[tools] INTERNAL_SECRET not set — calendar/sheet calls will fall back to the demo (admin) account on the web service.',
+      );
+    }
+    if (!toNumber) {
+      console.warn(
+        '[tools] dialed number unresolved — calendar/sheet calls will fall back to the demo (admin) account on the web service.',
+      );
+    }
+    const calendarTools = makeCalendarTools({
+      appUrl: process.env['APP_URL'] ?? 'http://localhost:3002',
+      dialedPhone: toNumber,
+      internalSecret,
+    });
 
     const agent = new TenantAgent({
       instructions: cfg.instructions + HANGUP_DIRECTIVE,
