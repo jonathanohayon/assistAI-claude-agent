@@ -18,7 +18,9 @@ import {
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
+import * as aic from '@livekit/plugins-ai-coustics';
 import { RoomEvent } from '@livekit/rtc-node';
+import { RoomServiceClient } from 'livekit-server-sdk';
 import { z } from 'zod';
 
 import {
@@ -359,6 +361,29 @@ export default defineAgent<ProcessUserData>({
       } catch (e) {
         console.warn('[hangup] session.close threw:', (e as Error).message);
       }
+      // session.close() only stops the agent's audio pipeline. To actually
+      // hang up the SIP call (= make Twilio drop the line + stop billing),
+      // we must delete the LiveKit room — this disconnects ALL participants
+      // including the SIP one. Without this, the caller hears silence after
+      // the agent's last words but the line stays open.
+      try {
+        const lkUrl = process.env['LIVEKIT_URL'];
+        const lkKey = process.env['LIVEKIT_API_KEY'];
+        const lkSecret = process.env['LIVEKIT_API_SECRET'];
+        if (lkUrl && lkKey && lkSecret) {
+          const httpUrl = lkUrl.replace(/^wss?:\/\//, (m) =>
+            m === 'wss://' ? 'https://' : 'http://',
+          );
+          const svc = new RoomServiceClient(httpUrl, lkKey, lkSecret);
+          await svc.deleteRoom(ctx.room.name ?? '');
+        } else {
+          console.warn(
+            '[hangup] LIVEKIT_URL/KEY/SECRET missing — skipping deleteRoom (SIP call may stay open)',
+          );
+        }
+      } catch (e) {
+        console.warn('[hangup] deleteRoom threw:', (e as Error).message);
+      }
     };
 
     // Reset on any activity that means "the call is alive".
@@ -575,7 +600,18 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${fro
     });
 
     try {
-      await session.start({ agent, room: ctx.room });
+      await session.start({
+        agent,
+        room: ctx.room,
+        // ai-coustics noise cancellation. Cleans up background noise (street,
+        // ventilation, music, kids) coming from the caller before it reaches
+        // the LLM. Drastically improves recognition on noisy phone calls.
+        // The default model (rookS) is tuned for low-latency telephony; pass
+        // `model: 'quailL'` for higher quality at the cost of CPU.
+        inputOptions: {
+          noiseCancellation: aic.audioEnhancement(),
+        },
+      });
       await sessionClosed;
     } finally {
       clearInterval(silenceWatcher);
