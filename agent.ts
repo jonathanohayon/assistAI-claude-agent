@@ -410,10 +410,17 @@ export default defineAgent<ProcessUserData>({
       },
     });
 
-    class JohanaAgent extends voice.Agent {
+    // Generic greeting — the LLM derives its prénom + business name from
+    // its system prompt (cfg.instructions) so the greeting follows the
+    // persona automatically when the user renames it. The legacy
+    // greetingInstructions field is now ignored; if power users want a
+    // custom opener, they encode it directly in their persona prompt.
+    const greetInstructions = `Salue chaleureusement la cliente en te présentant : utilise ton prénom et le nom du centre tels que définis dans tes instructions système. Demande poliment comment tu peux l'aider. Si la cliente répond en hébreu, bascule en hébreu pour la suite de l'échange.`;
+
+    class TenantAgent extends voice.Agent {
       override async onEnter(): Promise<void> {
         await this.session.generateReply({
-          instructions: cfg.greetingInstructions,
+          instructions: greetInstructions,
         });
       }
     }
@@ -436,7 +443,7 @@ Ne JAMAIS attendre que la cliente raccroche elle-même — c'est ton rôle de cl
 Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
 ──────────────────────────────────────────`;
 
-    const agent = new JohanaAgent({
+    const agent = new TenantAgent({
       instructions: cfg.instructions + HANGUP_DIRECTIVE,
       tools: { ...calendarTools, end_call: endCallTool },
     });
