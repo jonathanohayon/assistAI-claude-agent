@@ -403,14 +403,57 @@ export default defineAgent<ProcessUserData>({
     };
 
     // ── Latency instrumentation ─────────────────────────────────────────
-    // - greetingMs : time from session.start() resolved → first 'speaking'
-    // - turnLatencyMs[] : per turn, time from user 'speaking → listening'
-    //   (= user finished talking) → agent 'thinking|listening → speaking'
-    //   (= agent started replying). Mean is shipped at call end.
+    // Sources :
+    //   - Native LiveKit `MetricsCollected` events (canonical TTFA, EOU,
+    //     transcription delays, token counts incl. cache hit ratio).
+    //   - Manual fallback (greetingMs / wallclockTurnLatenciesMs) en cas
+    //     où les métriques natives ne fire pas (différence de provider,
+    //     cancelled responses, etc.) — sert aussi de cross-check.
     let sessionStartedAtMs: number | null = null;
     let greetingMs: number | null = null;
     let lastUserDoneAtMs: number | null = null;
-    const turnLatenciesMs: number[] = [];
+    const wallclockTurnLatenciesMs: number[] = [];
+
+    // Native realtime model metrics — TTFT (time-to-first-audio-token), the
+    // primary user-perceived latency for Realtime API. We collect every
+    // sample so we can compute mean, p50, p95 at call end.
+    const ttftMsList: number[] = [];
+    const responseDurationMs: number[] = [];
+    // Cache hit accounting (input tokens cached vs total) — confirms the
+    // prompt-cache optimization is working tenant-by-tenant.
+    let inputTokensTotal = 0;
+    let cachedInputTokens = 0;
+    // EOU (end-of-utterance) and transcription latency — useful to split
+    // "where did the time go" between VAD/STT/LLM.
+    const transcriptionDelayMs: number[] = [];
+    const endOfUtteranceDelayMs: number[] = [];
+
+    session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
+      // ev.metrics is a discriminated union by `type`.
+      const m = (ev as { metrics?: { type?: string } }).metrics;
+      if (!m || typeof m !== 'object') return;
+      const t = m.type;
+      const r = m as Record<string, unknown>;
+      if (t === 'realtime_model_metrics') {
+        const ttft = Number(r['ttftMs']);
+        if (Number.isFinite(ttft) && ttft > 0) ttftMsList.push(ttft);
+        const dur = Number(r['durationMs']);
+        if (Number.isFinite(dur) && dur > 0) responseDurationMs.push(dur);
+        const inT = Number(r['inputTokens']);
+        if (Number.isFinite(inT)) inputTokensTotal += inT;
+        const inputDetails = r['inputTokenDetails'] as
+          | { cachedTokens?: number }
+          | undefined;
+        if (inputDetails && Number.isFinite(inputDetails.cachedTokens)) {
+          cachedInputTokens += Number(inputDetails.cachedTokens) || 0;
+        }
+      } else if (t === 'eou_metrics') {
+        const td = Number(r['transcriptionDelayMs']);
+        if (Number.isFinite(td) && td >= 0) transcriptionDelayMs.push(td);
+        const eou = Number(r['endOfUtteranceDelayMs']);
+        if (Number.isFinite(eou) && eou >= 0) endOfUtteranceDelayMs.push(eou);
+      }
+    });
 
     // Reset on any activity that means "the call is alive".
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, resetActivity);
@@ -435,7 +478,7 @@ export default defineAgent<ProcessUserData>({
       }
       // Agent reply just started → close the per-turn responsiveness window.
       if (next === 'speaking' && lastUserDoneAtMs !== null) {
-        turnLatenciesMs.push(Date.now() - lastUserDoneAtMs);
+        wallclockTurnLatenciesMs.push(Date.now() - lastUserDoneAtMs);
         lastUserDoneAtMs = null;
       }
     });
@@ -788,30 +831,68 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${loc
       await sessionClosed;
     } finally {
       clearInterval(silenceWatcher);
-      // Ship the latency metrics as a dedicated event so /dashboard/logs can
-      // surface them with a special badge. Done before triggerRecap so even
-      // if the recap fails, the metrics land.
-      const turnCount = turnLatenciesMs.length;
-      const avgTurnMs = turnCount
-        ? Math.round(
-            turnLatenciesMs.reduce((s, x) => s + x, 0) / turnCount,
-          )
+      // Ship enriched latency metrics. Pulls from BOTH:
+      //   - Native LiveKit MetricsCollected events (TTFA = ttftMs canonique
+      //     côté Realtime, EOU + transcription, cache hit ratio)
+      //   - Wallclock fallback (greetingMs + per-turn) en cross-check
+      //
+      // Stats : moyenne, p50 (médiane), p95 sur les samples.
+      const stats = (arr: number[]) => {
+        if (arr.length === 0)
+          return { count: 0, mean: null, p50: null, p95: null, max: null };
+        const sorted = [...arr].sort((a, b) => a - b);
+        const mean = Math.round(arr.reduce((s, x) => s + x, 0) / arr.length);
+        const p50 = sorted[Math.floor(sorted.length * 0.5)] ?? null;
+        const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? null;
+        const max = sorted[sorted.length - 1] ?? null;
+        return {
+          count: arr.length,
+          mean,
+          p50: p50 != null ? Math.round(p50) : null,
+          p95: p95 != null ? Math.round(p95) : null,
+          max: max != null ? Math.round(max) : null,
+        };
+      };
+
+      const ttfa = stats(ttftMsList);
+      const dur = stats(responseDurationMs);
+      const eou = stats(endOfUtteranceDelayMs);
+      const trans = stats(transcriptionDelayMs);
+      const wall = stats(wallclockTurnLatenciesMs);
+      const cacheHitRatio = inputTokensTotal > 0
+        ? Math.round((cachedInputTokens / inputTokensTotal) * 100)
         : null;
-      const fmt = (ms: number | null) => (ms == null ? '?' : `${(ms / 1000).toFixed(2)}s`);
-      await remoteLog(
-        'latency',
-        'call_metrics',
-        `⏱️ Greeting: ${fmt(greetingMs)} · Turn moy: ${fmt(avgTurnMs)} (${turnCount} tour${turnCount > 1 ? 's' : ''})`,
-        'info',
-        {
-          greetingMs,
-          avgTurnMs,
-          turnCount,
-          turnLatenciesMs,
-          fromNumber,
-          toNumber,
+      const fmt = (ms: number | null) =>
+        ms == null ? '?' : `${(ms / 1000).toFixed(2)}s`;
+      const fmtMs = (ms: number | null) => (ms == null ? '?' : `${ms}ms`);
+
+      const summary =
+        `⏱️ TTFA: ${fmtMs(ttfa.mean)} mean · ${fmtMs(ttfa.p95)} p95 (${ttfa.count} resp) · ` +
+        `Greeting: ${fmt(greetingMs)} · ` +
+        `Cache: ${cacheHitRatio == null ? 'n/a' : cacheHitRatio + '%'} hit · ` +
+        `Trans: ${fmtMs(trans.mean)} · EOU: ${fmtMs(eou.mean)}`;
+
+      await remoteLog('latency', 'call_metrics', summary, 'info', {
+        // Headline KPIs (the user-perceived numbers)
+        ttfaMs: ttfa,
+        responseDurationMs: dur,
+        greetingMs,
+        // Breakdown KPIs
+        endOfUtteranceDelayMs: eou,
+        transcriptionDelayMs: trans,
+        wallclockTurnLatenciesMs: wall,
+        // Cache effectiveness — confirms the static-prefix optimization
+        promptCache: {
+          inputTokensTotal,
+          cachedInputTokens,
+          cacheHitRatio,
         },
-      );
+        // Routing context for filtering in /dashboard/logs
+        fromNumber,
+        toNumber,
+        // Raw arrays for power-user debug
+        rawTtftMs: ttftMsList,
+      });
       await remoteLog(
         'agent',
         'call_ended',
