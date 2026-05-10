@@ -9,6 +9,10 @@ export interface ToolContext {
   /** INTERNAL_SECRET shared between agent and web — authorizes per-tenant
    *  routing on /api/calendar/* and /api/sheets/contact. */
   internalSecret: string;
+  /** Live caller number getter — populated AFTER ToolContext construction
+   *  via SIP attributes. The take_message tool reads it at invoke time so
+   *  late-arriving attributes are picked up. Returns '' if unknown. */
+  getCallerPhone?: () => string;
 }
 
 const makePost =
@@ -266,6 +270,31 @@ export const makeCalendarTools = (ctx: ToolContext) => {
     },
   });
 
+  const takeMessage = llm.tool({
+    description:
+      "À utiliser quand la cliente NE veut PAS prendre de RDV mais veut laisser un message au proprio (ex: 'dis-lui que…', 'peux-tu lui transmettre que…', 'rappelle-moi'). Envoie le message immédiatement par WhatsApp au proprio. Le numéro de la cliente est attaché automatiquement (pas besoin de le passer). Confirme à la cliente que le message a été transmis avant de raccrocher.",
+    parameters: z.object({
+      message: z.string().describe("Message complet à transmettre au proprio, formulé clairement (français/hébreu, peu importe — le proprio comprend les deux)."),
+      caller_name: z
+        .string()
+        .nullish()
+        .describe("Prénom de la cliente si elle l'a donné. Optionnel."),
+    }),
+    execute: async ({ message, caller_name }) => {
+      const phone = ctx.getCallerPhone?.() ?? '';
+      const data = await post<{ ok?: boolean; sid?: string; error?: string }>(
+        '/api/whatsapp/notify',
+        {
+          message,
+          callerName: caller_name ?? undefined,
+          callerPhone: phone || undefined,
+        },
+      );
+      if (!data.ok) return `Erreur WhatsApp : ${data.error ?? 'inconnue'}`;
+      return `Message transmis au proprio par WhatsApp.${phone ? ` Numéro de la cliente joint : ${phone}.` : ''}`;
+    },
+  });
+
   return {
     list_available_dates: listAvailableDates,
     check_availability: checkAvailability,
@@ -274,5 +303,6 @@ export const makeCalendarTools = (ctx: ToolContext) => {
     find_appointment: findAppointment,
     cancel_appointment: cancelAppointment,
     reschedule_appointment: rescheduleAppointment,
+    take_message: takeMessage,
   } as const;
 };

@@ -500,6 +500,11 @@ Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
       appUrl: process.env['APP_URL'] ?? 'http://localhost:3002',
       dialedPhone: toNumber,
       internalSecret,
+      // Live getter — fromNumber may arrive AFTER tools are built (SIP attrs
+      // race). Convert +972 → 0 here too so the WhatsApp the owner reads
+      // shows the local format directly.
+      getCallerPhone: () =>
+        fromNumber.startsWith('+972') ? '0' + fromNumber.slice(4) : fromNumber,
     });
 
     // Current date/time in Jerusalem — injected so the LLM can resolve
