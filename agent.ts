@@ -466,8 +466,22 @@ Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
       internalSecret,
     });
 
+    // Inject the caller's number (when known) so the LLM doesn't ask the
+    // customer for a phone they're already calling from. Withheld/private
+    // numbers leave fromNumber empty → no hint → LLM asks like before.
+    const callerHint = fromNumber
+      ? `
+
+──────────────────────────────────────────
+**NUMÉRO DU CLIENT (déjà connu via l'appel)**
+Le client t'appelle depuis le numéro \`${fromNumber}\`. Quand un tool a besoin du champ \`phone\` (par ex. \`book_appointment\`, \`save_contact\`), utilise CE numéro directement — ne demande PAS son numéro à la cliente, c'est inutile et ça donne mauvaise impression.
+
+Exception : si la cliente te dit spontanément qu'elle veut être contactée sur un AUTRE numéro, utilise celui-là à la place.
+──────────────────────────────────────────`
+      : '';
+
     const agent = new TenantAgent({
-      instructions: cfg.instructions + HANGUP_DIRECTIVE,
+      instructions: cfg.instructions + HANGUP_DIRECTIVE + callerHint,
       tools: { ...calendarTools, end_call: endCallTool },
     });
 
