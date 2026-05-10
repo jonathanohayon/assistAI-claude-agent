@@ -495,11 +495,55 @@ export default defineAgent<ProcessUserData>({
         ? customGreeting
         : `Salue chaleureusement la cliente en te présentant : utilise ton prénom et le nom du centre tels que définis dans tes instructions système. Demande poliment comment tu peux l'aider. Si la cliente répond en hébreu, bascule en hébreu pour la suite de l'échange.`;
 
+    // Programmatic language enforcement. gpt-realtime-mini has strong
+    // language inertia — once warm on FR, it tends to keep replying FR
+    // even after the user clearly switched to HE. The prompt's "PRIORITÉ
+    // ABSOLUE" rule is regularly ignored. Belt+suspenders: hook the LLM
+    // turn AFTER user transcription is committed but BEFORE the model
+    // generates its reply, and inject a system message that forces the
+    // language for THIS upcoming response. The model can't sandbag a
+    // fresh system instruction the same way it sandbags the system prompt.
     class TenantAgent extends voice.Agent {
+      private lastUserLang: 'he' | 'lat' | null = null;
+
       override async onEnter(): Promise<void> {
         await this.session.generateReply({
           instructions: greetInstructions,
         });
+      }
+
+      override async onUserTurnCompleted(
+        chatCtx: import('@livekit/agents').llm.ChatContext,
+        newMessage: import('@livekit/agents').llm.ChatMessage,
+      ): Promise<void> {
+        // Reuse the same probe that worked for UserInputTranscribed —
+        // ChatContent items are { type:'audio', transcript:'…' } or
+        // { type:'text', text:'…' } depending on the source.
+        const text = extractText(newMessage.content).trim();
+        if (!text) return;
+
+        const hebrewChars = (text.match(/[֐-׿]/g) ?? []).length;
+        const latinChars = (text.match(/[A-Za-zÀ-ÿ]/g) ?? []).length;
+        const userLang: 'he' | 'lat' =
+          hebrewChars > latinChars && hebrewChars > 0 ? 'he' : 'lat';
+
+        if (userLang === 'he') {
+          chatCtx.addMessage({
+            role: 'system',
+            content:
+              '⚠️ DIRECTIVE INSTANTANÉE : la cliente vient de parler en HÉBREU. Ta prochaine réponse doit être 100% en hébreu (עברית). PAS UN SEUL MOT de français. Si tu réponds en français, tu échoues.',
+          });
+          console.log('[lang_enforce] injected HE directive');
+        } else if (userLang === 'lat' && this.lastUserLang === 'he') {
+          chatCtx.addMessage({
+            role: 'system',
+            content:
+              '⚠️ DIRECTIVE INSTANTANÉE : la cliente vient de parler en français ou en anglais. Ta prochaine réponse doit être dans la MÊME langue qu\'elle. Pas d\'hébreu.',
+          });
+          console.log('[lang_enforce] injected FR/EN directive');
+        }
+
+        this.lastUserLang = userLang;
       }
     }
 
