@@ -3,7 +3,7 @@
 // ou les paramètres du modèle realtime — pas besoin de toucher agent.ts.
 
 export const REALTIME_CONFIG = {
-  model: process.env['REALTIME_MODEL'] ?? 'gpt-realtime-2',
+  model: process.env['REALTIME_MODEL'] ?? 'gpt-realtime',
   voice: process.env['REALTIME_VOICE'] ?? 'marin',
   // gpt-realtime-whisper : modèle de transcription dédié au Realtime API
   // (meilleur multilingue HE/FR/EN que whisper-1, tuned pour faible latence
