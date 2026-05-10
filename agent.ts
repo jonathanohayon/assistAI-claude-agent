@@ -402,11 +402,25 @@ export default defineAgent<ProcessUserData>({
       }
     };
 
+    // ── Latency instrumentation ─────────────────────────────────────────
+    // - greetingMs : time from session.start() resolved → first 'speaking'
+    // - turnLatencyMs[] : per turn, time from user 'speaking → listening'
+    //   (= user finished talking) → agent 'thinking|listening → speaking'
+    //   (= agent started replying). Mean is shipped at call end.
+    let sessionStartedAtMs: number | null = null;
+    let greetingMs: number | null = null;
+    let lastUserDoneAtMs: number | null = null;
+    const turnLatenciesMs: number[] = [];
+
     // Reset on any activity that means "the call is alive".
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, resetActivity);
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
-      if ((ev as { newState?: string }).newState === 'speaking') {
-        resetActivity();
+      const next = (ev as { newState?: string }).newState;
+      const old = (ev as { oldState?: string }).oldState;
+      if (next === 'speaking') resetActivity();
+      // User just finished speaking → start the responsiveness timer.
+      if (old === 'speaking' && (next === 'listening' || next === 'away')) {
+        lastUserDoneAtMs = Date.now();
       }
     });
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
@@ -415,6 +429,15 @@ export default defineAgent<ProcessUserData>({
       // reset on 'speaking' / 'thinking' / 'initializing' which represent
       // active processing.
       if (next && next !== 'listening') resetActivity();
+      // First time the agent starts speaking after session start = greeting.
+      if (next === 'speaking' && greetingMs === null && sessionStartedAtMs !== null) {
+        greetingMs = Date.now() - sessionStartedAtMs;
+      }
+      // Agent reply just started → close the per-turn responsiveness window.
+      if (next === 'speaking' && lastUserDoneAtMs !== null) {
+        turnLatenciesMs.push(Date.now() - lastUserDoneAtMs);
+        lastUserDoneAtMs = null;
+      }
     });
     // Tool execution counts as activity — calendar lookups can take seconds.
     session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, resetActivity);
@@ -742,9 +765,36 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${loc
           noiseCancellation: aic.audioEnhancement(),
         },
       });
+      // Mark the moment the session is ready — anything after this until the
+      // first 'speaking' transition is the greeting latency.
+      sessionStartedAtMs = Date.now();
       await sessionClosed;
     } finally {
       clearInterval(silenceWatcher);
+      // Ship the latency metrics as a dedicated event so /dashboard/logs can
+      // surface them with a special badge. Done before triggerRecap so even
+      // if the recap fails, the metrics land.
+      const turnCount = turnLatenciesMs.length;
+      const avgTurnMs = turnCount
+        ? Math.round(
+            turnLatenciesMs.reduce((s, x) => s + x, 0) / turnCount,
+          )
+        : null;
+      const fmt = (ms: number | null) => (ms == null ? '?' : `${(ms / 1000).toFixed(2)}s`);
+      await remoteLog(
+        'latency',
+        'call_metrics',
+        `⏱️ Greeting: ${fmt(greetingMs)} · Turn moy: ${fmt(avgTurnMs)} (${turnCount} tour${turnCount > 1 ? 's' : ''})`,
+        'info',
+        {
+          greetingMs,
+          avgTurnMs,
+          turnCount,
+          turnLatenciesMs,
+          fromNumber,
+          toNumber,
+        },
+      );
       await remoteLog(
         'agent',
         'call_ended',
