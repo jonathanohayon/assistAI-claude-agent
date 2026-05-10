@@ -43,12 +43,45 @@ const makePost =
 // so it commits to a centre when querying or booking.
 const CENTER_ENUM = z.enum(['jerusalem', 'ashdod', 'natanya']);
 
+type SuggestedDate = { date: string; weekday: string };
+
+const formatSuggested = (suggested?: SuggestedDate[]): string =>
+  suggested && suggested.length > 0
+    ? suggested.map((d) => `${d.weekday} ${d.date}`).join(', ')
+    : '';
+
 export const makeCalendarTools = (ctx: ToolContext) => {
   const post = makePost(ctx);
 
+  const listAvailableDates = llm.tool({
+    description:
+      "Renvoie les prochaines dates valides pour un centre donné — déterministe, source de vérité. À APPELER systématiquement avant de proposer une date à la cliente : NE devine JAMAIS quel jour de la semaine correspond à quel centre, demande ce tool. Utile aussi quand la cliente dit 'je veux Jérusalem la semaine prochaine' → tu obtiens directement les dates ouvertes.",
+    parameters: z.object({
+      center: CENTER_ENUM.describe("Centre voulu par la cliente (jerusalem, ashdod, natanya)."),
+      count: z.number().int().nullish().describe("Combien de prochaines dates retourner (défaut 3, max 10)."),
+      after: z.string().nullish().describe("Optionnel : YYYY-MM-DD à partir de laquelle chercher (exclusif). Sinon, à partir d'aujourd'hui."),
+    }),
+    execute: async ({ center, count, after }) => {
+      const data = await post<{
+        center: string;
+        label: string;
+        dates: SuggestedDate[];
+        error?: string;
+      }>('/api/calendar/list-dates', {
+        center,
+        count: count ?? 3,
+        after: after ?? undefined,
+      });
+      if (data.error) return `Erreur : ${data.error}`;
+      const dates = data.dates ?? [];
+      if (dates.length === 0) return `Aucune date trouvée pour ${data.label}.`;
+      return `Prochaines dates ouvertes à ${data.label} : ${formatSuggested(dates)}.`;
+    },
+  });
+
   const checkAvailability = llm.tool({
     description:
-      "Vérifie les créneaux disponibles. Le centre ouvert dépend du jour : LUNDI=Ashdod, MERCREDI=Natanya, autres jours=Jérusalem. Si tu indiques un centre qui ne correspond pas au jour demandé, l'API te dira lequel est ouvert.",
+      "Vérifie les créneaux disponibles pour une date + centre précis. Si la date ne matche pas le centre, l'API renvoie suggested_dates avec les prochaines dates valides — utilise-les directement. Si tu ne sais pas quelle date proposer, appelle d'abord list_available_dates(center).",
     parameters: z.object({
       date: z.string().describe("Date au format YYYY-MM-DD (ex: 2026-05-12)."),
       center: CENTER_ENUM.nullish().describe(
@@ -58,14 +91,29 @@ export const makeCalendarTools = (ctx: ToolContext) => {
     execute: async ({ date, center }) => {
       const data = await post<{
         date: string;
-        center: string;
-        label: string;
-        available_slots: string[];
+        center?: string;
+        label?: string;
+        available_slots?: string[];
         reason?: string;
+        error?: string;
+        message?: string;
+        suggested_dates?: SuggestedDate[];
+        open_label_that_day?: string;
+        requested_center?: string;
       }>('/api/calendar/availability', {
         date,
         center: center ?? undefined,
       });
+      // Wrong day for requested center → server already gave us the next
+      // valid dates for that center. Surface them to the LLM verbatim.
+      if (data.error === 'wrong_day_for_center') {
+        return `${data.message} Propose une de ces dates à la cliente.`;
+      }
+      // No slots left on this date → server gave us the next valid dates
+      // for the SAME center.
+      if (data.reason && data.suggested_dates) {
+        return `${data.reason}`;
+      }
       if (data.reason) {
         return `${data.reason} Veux-tu un créneau à ${data.label} le ${date} ?`;
       }
@@ -99,7 +147,9 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         success?: boolean;
         summary?: string;
         error?: string;
+        message?: string;
         expectedLabel?: string;
+        suggested_dates?: SuggestedDate[];
       }>('/api/calendar/book', {
         name,
         phone,
@@ -111,6 +161,12 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         duration: duration ?? 30,
       });
       if (!data.success) {
+        // Wrong center for the day → server gave us next valid dates for
+        // the requested center. Hand them back so the LLM can re-propose.
+        if (data.error === 'wrong_day_for_center') {
+          const next = formatSuggested(data.suggested_dates);
+          return `${data.message ?? data.error}${next ? ` Propose plutôt : ${next}.` : ''}`;
+        }
         if (data.expectedLabel) {
           return `${data.error} (Le bon centre pour le ${date} est ${data.expectedLabel}.)`;
         }
@@ -211,6 +267,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
   });
 
   return {
+    list_available_dates: listAvailableDates,
     check_availability: checkAvailability,
     book_appointment: bookAppointment,
     save_contact: saveContact,
