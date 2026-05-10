@@ -530,6 +530,16 @@ export default defineAgent<ProcessUserData>({
       private lastUserLang: 'he' | 'lat' | null = null;
 
       override async onEnter(): Promise<void> {
+        // Inject the per-call dynamic context (today's date, caller phone)
+        // as a system message at the START of chatCtx — visible to the
+        // model for ALL subsequent turns, but OUTSIDE the cached prefix
+        // (this.instructions stays 100% identical across calls for the
+        // same tenant). Maximizes prompt cache hit rate.
+        if (PER_CALL_CONTEXT.trim()) {
+          const ctx = this.chatCtx.copy();
+          ctx.addMessage({ role: 'system', content: PER_CALL_CONTEXT });
+          await this.updateChatCtx(ctx);
+        }
         await this.session.generateReply({
           instructions: greetInstructions,
         });
@@ -734,14 +744,21 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${loc
 ──────────────────────────────────────────`
       : '';
 
+    // Cache-friendly assembly : everything in `instructions` MUST be
+    // identical across calls for the same tenant (= maximize OpenAI prompt
+    // cache hits, which dramatically reduce TTFT and cost). The dynamic
+    // bits (today's date, caller phone) are injected as a system message
+    // in chatCtx via TenantAgent.onEnter — they live AFTER the cached
+    // prefix so they don't break the cache.
+    const STATIC_INSTRUCTIONS =
+      cfg.instructions +
+      SPOKEN_TIME_DIRECTIVE +
+      SPOKEN_PHONE_DIRECTIVE +
+      HANGUP_DIRECTIVE;
+    const PER_CALL_CONTEXT = dateContextBlock + callerHint;
+
     const agent = new TenantAgent({
-      instructions:
-        cfg.instructions +
-        dateContextBlock +
-        SPOKEN_TIME_DIRECTIVE +
-        SPOKEN_PHONE_DIRECTIVE +
-        HANGUP_DIRECTIVE +
-        callerHint,
+      instructions: STATIC_INSTRUCTIONS,
       tools: { ...calendarTools, end_call: endCallTool },
     });
 
