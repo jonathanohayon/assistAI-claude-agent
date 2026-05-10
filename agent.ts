@@ -559,26 +559,56 @@ En hébreu :
 Quand tu PASSES une heure à un tool (\`book_appointment\`, etc.), garde le format \`HH:MM\` dans les arguments — c'est uniquement la prononciation orale qui change.
 ──────────────────────────────────────────`;
 
+    // Convert E.164 to Israeli local format for both speaking AND tool args.
+    // +972585001007 → 0585001007. Customers dictate local format, store in
+    // local format, agent reads local format. Other country codes stay as-is
+    // (the SPOKEN_PHONE_DIRECTIVE handles digit-by-digit pronunciation).
+    const localFromNumber = fromNumber.startsWith('+972')
+      ? '0' + fromNumber.slice(4)
+      : fromNumber;
+
+    // Hard directive on how to PRONOUNCE phone numbers. Realtime models
+    // default to compound numbers ("cinq cent quatre-vingt-cinq mille…")
+    // which is unintelligible. Force digit-by-digit.
+    const SPOKEN_PHONE_DIRECTIVE = `
+
+──────────────────────────────────────────
+**PRONONCIATION DES NUMÉROS DE TÉLÉPHONE — IMPORTANT**
+Quand tu lis un numéro de téléphone à VOIX HAUTE :
+1. JAMAIS l'indicatif international (\`+972\`, \`+33\`, etc.) — utilise toujours le format local israélien (commence par \`0\`).
+2. Lis CHIFFRE PAR CHIFFRE, jamais comme un grand nombre. \`0585001007\` se lit "zéro, cinq, huit, cinq, zéro, zéro, un, zéro, zéro, sept" — PAS "cinq cent quatre-vingt-cinq mille…".
+3. Groupe par paires pour la fluidité : \`05 85 00 10 07\` → "zéro cinq, huit cinq, zéro zéro, un zéro, zéro sept" avec une micro-pause entre chaque paire.
+
+En hébreu, même logique : chiffre par chiffre, groupé par paires.
+- \`0585001007\` → "אפס חמש, שמונה חמש, אפס אפס, אחת אפס, אפס שבע"
+
+En anglais : "zero five, eight five, zero zero, one zero, zero seven".
+
+Cette règle s'applique à TOUS les numéros que tu énonces — celui qui appelle, celui qu'une cliente te dicte pour confirmation, etc.
+──────────────────────────────────────────`;
+
     // Inject the caller's number (when known) so the LLM proposes it for
     // confirmation instead of asking blind. We don't blindly trust it —
     // sometimes a customer calls from a relative's phone, so the LLM must
     // confirm before using it. Withheld/private numbers leave fromNumber
     // empty → no hint → LLM asks like before.
-    const callerHint = fromNumber
+    const callerHint = localFromNumber
       ? `
 
 ──────────────────────────────────────────
 **NUMÉRO DU CLIENT (détecté via l'appel)**
-Le numéro qui appelle est : \`${fromNumber}\`.
+Le numéro qui appelle est : \`${localFromNumber}\` (format local, à utiliser tel quel pour les tools).
 
 Avant d'utiliser ce numéro pour un tool (\`book_appointment\`, \`save_contact\`, etc.), CONFIRME-le avec la cliente — formule courte du genre :
-  « Je note le rendez-vous au numéro qui appelle, le \`${fromNumber}\`, c'est bien le bon ? »
-ou en hébreu : « אני רושמת את התור על המספר שממנו את מתקשרת, \`${fromNumber}\`, נכון? »
+  « Je note le rendez-vous au numéro qui appelle, le \`${localFromNumber}\`, c'est bien le bon ? »
+ou en hébreu : « אני רושמת את התור על המספר שממנו את מתקשרת, \`${localFromNumber}\`, נכון? »
 
-- Si elle confirme → utilise \`${fromNumber}\` dans le champ \`phone\`.
+Rappel : prononce chiffre par chiffre par paires (voir directive ci-dessus), pas comme un grand nombre.
+
+- Si elle confirme → utilise \`${localFromNumber}\` dans le champ \`phone\`.
 - Si elle te donne un AUTRE numéro (elle appelle depuis le tel de sa mère, du bureau, etc.) → utilise celui qu'elle te dicte.
 
-Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${fromNumber}\` pour confirmation d'abord, ça gagne du temps.
+Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${localFromNumber}\` pour confirmation d'abord, ça gagne du temps.
 ──────────────────────────────────────────`
       : '';
 
@@ -587,6 +617,7 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${fro
         cfg.instructions +
         dateContextBlock +
         SPOKEN_TIME_DIRECTIVE +
+        SPOKEN_PHONE_DIRECTIVE +
         HANGUP_DIRECTIVE +
         callerHint,
       tools: { ...calendarTools, end_call: endCallTool },
