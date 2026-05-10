@@ -30,10 +30,17 @@ import {
 import { calendarTools } from './tools/calendar.js';
 
 // Inactivity threshold before the agent hangs up by itself.
-const SILENCE_HANGUP_MS = 8_000;
+// 30s = enough for a customer to think mid-conversation without us cutting
+// them off, but short enough that a stale call doesn't linger forever.
+// Override via SILENCE_HANGUP_MS env var.
+const SILENCE_HANGUP_MS = Number(process.env['SILENCE_HANGUP_MS'] ?? 30_000);
 // Delay between an LLM-triggered end_call and the actual close, to let the
 // agent's goodbye audio finish playing on the caller's side.
 const END_CALL_GRACE_MS = 1_500;
+// Grace period at the start of the call before the silence watchdog kicks
+// in. The customer might pause briefly after the greeting; we don't want to
+// pre-empt them.
+const SILENCE_GRACE_START_MS = 10_000;
 
 type ProcessUserData = {
   vad?: silero.VAD;
@@ -331,7 +338,8 @@ export default defineAgent<ProcessUserData>({
     //   1. The LLM calls the `end_call` tool when the conversation is done.
     //   2. No activity (user speech / agent speech / tool execution) for
     //      SILENCE_HANGUP_MS — the call is dead, hang up.
-    let lastActivity = Date.now();
+    const sessionStartedAt = Date.now();
+    let lastActivity = sessionStartedAt;
     let closing = false;
     const resetActivity = () => {
       lastActivity = Date.now();
@@ -362,16 +370,24 @@ export default defineAgent<ProcessUserData>({
     });
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
       const next = (ev as { newState?: string }).newState;
-      if (next === 'speaking' || next === 'thinking') resetActivity();
+      // 'listening' is the idle state where we WANT to count silence — only
+      // reset on 'speaking' / 'thinking' / 'initializing' which represent
+      // active processing.
+      if (next && next !== 'listening') resetActivity();
     });
+    // Tool execution counts as activity — calendar lookups can take seconds.
+    session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, resetActivity);
 
     const silenceWatcher = setInterval(() => {
       if (closing) return;
+      // Grace period at the start: don't hang up just because the customer
+      // takes a beat to respond to the greeting.
+      if (Date.now() - sessionStartedAt < SILENCE_GRACE_START_MS) return;
       if (Date.now() - lastActivity > SILENCE_HANGUP_MS) {
         clearInterval(silenceWatcher);
         void closeSession(`silence_${SILENCE_HANGUP_MS}ms`);
       }
-    }, 1_000);
+    }, 2_000);
 
     // ── end_call tool — exposed to the LLM ──────────────────────────────
     const endCallTool = llm.tool({
