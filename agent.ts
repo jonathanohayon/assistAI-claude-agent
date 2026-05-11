@@ -264,9 +264,14 @@ export default defineAgent<ProcessUserData>({
           const e = event as { type?: string; error?: { message?: string } };
           if (e?.type === 'session.created') {
             try {
+              // NB : `session.type: "realtime"` est requis par OpenAI sur
+              // tout session.update (sinon missing_required_parameter).
               sess.sendEvent({
                 type: 'session.update',
-                session: { reasoning_effort: 'low' },
+                session: {
+                  type: 'realtime',
+                  reasoning_effort: 'low',
+                },
               } as never);
               console.log(
                 '[reasoning_effort] applied "low" via session.update',
