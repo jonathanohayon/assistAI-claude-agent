@@ -255,10 +255,23 @@ export default defineAgent<ProcessUserData>({
         model: cfg.model,
         modalities: [...REALTIME_CONFIG.modalities],
         voice: cfg.voice,
-        temperature: cfg.temperature,
+        // temperature : deprecated dans l'API GA (renvoyait unknown_parameter
+        // sur certaines combos). On laisse au défaut du modèle.
         speed: cfg.speed,
         inputAudioTranscription: {
           model: REALTIME_CONFIG.transcriptionModel,
+        },
+        // Optims latence (target : TTFA p50 ~750ms, p95 <1400ms) :
+        // - threshold plus haut → VAD plus confiant, moins de re-triggers
+        // - silence_duration_ms court → l'agent répond plus vite après que
+        //   la cliente a fini de parler
+        // - prefix_padding_ms réduit → moins de buffer avant détection
+        turnDetection: {
+          type: 'server_vad',
+          threshold: 0.68,
+          prefix_padding_ms: 250,
+          silence_duration_ms: 480,
+          create_response: true,
         },
       }),
     });
