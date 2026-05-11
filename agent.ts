@@ -257,8 +257,11 @@ export default defineAgent<ProcessUserData>({
     class LowReasoningRealtimeModel extends openai.realtime.RealtimeModel {
       override session(): openai.realtime.RealtimeSession {
         const sess = super.session();
+        // Trace TOUS les server events critiques pour debug : session.created,
+        // session.updated, error. Permet de vérifier que reasoning_effort
+        // est accepté (session.updated avec nos champs) ou rejeté (error).
         sess.on('openai_server_event_received', (event: unknown) => {
-          const e = event as { type?: string };
+          const e = event as { type?: string; error?: { message?: string } };
           if (e?.type === 'session.created') {
             try {
               sess.sendEvent({
@@ -268,12 +271,33 @@ export default defineAgent<ProcessUserData>({
               console.log(
                 '[reasoning_effort] applied "low" via session.update',
               );
+              void remoteLog(
+                'agent',
+                'reasoning_effort_applied',
+                'reasoning_effort: low envoyé via session.update',
+                'info',
+              );
             } catch (err) {
-              console.warn(
-                '[reasoning_effort] failed to apply:',
-                (err as Error).message,
+              const msg = (err as Error).message;
+              console.warn('[reasoning_effort] failed to apply:', msg);
+              void remoteLog(
+                'agent',
+                'reasoning_effort_failed',
+                `Échec envoi session.update : ${msg.slice(0, 200)}`,
+                'warn',
+                { error: msg },
               );
             }
+          } else if (e?.type === 'error') {
+            const errMsg = e.error?.message ?? 'erreur inconnue';
+            console.warn('[realtime_server_error]', errMsg);
+            void remoteLog(
+              'agent',
+              'realtime_server_error',
+              `OpenAI Realtime error : ${errMsg.slice(0, 300)}`,
+              'error',
+              { rawEvent: event },
+            );
           }
         });
         return sess;
