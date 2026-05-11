@@ -247,9 +247,42 @@ export default defineAgent<ProcessUserData>({
       { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
     );
 
+    // Sub-classe RealtimeModel pour injecter reasoning_effort: "low" dès que
+    // OpenAI confirme la création de la session. Le SDK Node n'expose pas
+    // reasoningEffort dans le constructeur (uniquement Python pour le
+    // moment), donc on passe par un raw session.update via sendEvent dès
+    // qu'on reçoit l'event 'session.created' sur le canal openai_server_event_received.
+    // Gain attendu : TTFT du modèle réduit significativement (moins de
+    // tokens de raisonnement avant le 1er token audio).
+    class LowReasoningRealtimeModel extends openai.realtime.RealtimeModel {
+      override session(): openai.realtime.RealtimeSession {
+        const sess = super.session();
+        sess.on('openai_server_event_received', (event: unknown) => {
+          const e = event as { type?: string };
+          if (e?.type === 'session.created') {
+            try {
+              sess.sendEvent({
+                type: 'session.update',
+                session: { reasoning_effort: 'low' },
+              } as never);
+              console.log(
+                '[reasoning_effort] applied "low" via session.update',
+              );
+            } catch (err) {
+              console.warn(
+                '[reasoning_effort] failed to apply:',
+                (err as Error).message,
+              );
+            }
+          }
+        });
+        return sess;
+      }
+    }
+
     const session = new voice.AgentSession({
       vad,
-      llm: new openai.realtime.RealtimeModel({
+      llm: new LowReasoningRealtimeModel({
         apiKey,
         baseURL: REALTIME_CONFIG.apiBase,
         model: cfg.model,
