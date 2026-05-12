@@ -249,12 +249,25 @@ export default defineAgent<ProcessUserData>({
     const vad = ctx.proc.userData.vad;
     if (!vad) throw new Error('Silero VAD non préchargé.');
 
+    // Phase timings — Date.now() pris à chaque transition pour identifier
+    // exactement où le temps passe entre l'entry() et le moment où le
+    // greeting commence à sortir. Inclus dans call_metrics à la fin.
+    const phaseT0 = Date.now();
+    let tConnectDone = 0;
+    let tSipResolved = 0;
+    let tConfigFetched = 0;
+    let tSessionStarted = 0;
+
     await ctx.connect(undefined, AutoSubscribe.SUBSCRIBE_ALL);
+    tConnectDone = Date.now();
 
     // Resolve the called number BEFORE fetching config so we can route to
     // the right tenant. SIP participant attributes arrive shortly after the
-    // room connects — wait briefly for them.
-    const calledNumber = await waitForCalledNumber(ctx, 3_000);
+    // room connects — wait briefly for them. Réduit de 3s → 1.5s : sur les
+    // tests prod les attrs SIP arrivent en <500ms. Au-delà de 1.5s on
+    // tombe sur le fallback default-tenant (cas admin web test).
+    const calledNumber = await waitForCalledNumber(ctx, 1_500);
+    tSipResolved = Date.now();
     await remoteLog(
       'agent',
       'call_started',
@@ -264,6 +277,7 @@ export default defineAgent<ProcessUserData>({
     );
 
     const cfg = await fetchConfig(calledNumber);
+    tConfigFetched = Date.now();
     await remoteLog(
       'agent',
       'config_loaded',
@@ -272,12 +286,32 @@ export default defineAgent<ProcessUserData>({
       { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
     );
 
-    // Generic OpenAI server-error logger. Anciennement utilisé par la sonde
-    // reasoning_effort (4 variantes testées en cascade — toutes rejetées par
-    // OpenAI sur 4+ appels). La sonde a été retirée car les session.update
-    // invalides interrompaient la génération du greeting (réponse coupée à
-    // ~1s d'audio → cliente raccrochait). On garde uniquement le log des
-    // erreurs serveur pour debug futur.
+    // ── OpenAI Realtime server-event timings ─────────────────────────────
+    // En mode Realtime, le SDK LiveKit n'expose pas transcriptionDelay /
+    // endOfUtteranceDelay (eou_metrics laissé à undefined — OpenAI gère STT
+    // et turn detection en interne). On les calcule nous-mêmes depuis les
+    // events serveur OpenAI :
+    //   - input_audio_buffer.speech_stopped  → user finished speaking
+    //   - conversation.item.input_audio_transcription.completed  → STT done
+    //   - response.created  → agent starts generating
+    //   - response.output_audio.delta (1er) → first audio token
+    //
+    // Du coup :
+    //   transcriptionDelayMs = transcription.completed - speech_stopped
+    //   endOfUtteranceDelayMs = response.created - speech_stopped
+    //   firstAudioDelayMs = response.audio.delta[0] - response.created
+    //
+    // Important : declared BEFORE class LoggingRealtimeModel pour que le
+    // closure capture les bonnes refs au moment du handler.
+    const serverTranscriptionDelayMs: number[] = [];
+    const serverEouDelayMs: number[] = [];
+    const serverFirstAudioDelayMs: number[] = [];
+    let lastSpeechStoppedAtMs: number | null = null;
+    let lastResponseCreatedAtMs: number | null = null;
+    let firstAudioCapturedForResponse = false;
+
+    // Generic OpenAI server-event listener : capture les timings clés pour
+    // l'instrumentation latence, et log les errors serveur.
     class LoggingRealtimeModel extends openai.realtime.RealtimeModel {
       override session(): openai.realtime.RealtimeSession {
         const sess = super.session();
@@ -286,16 +320,50 @@ export default defineAgent<ProcessUserData>({
             type?: string;
             error?: { message?: string; param?: string };
           };
-          if (e?.type === 'error') {
-            const errMsg = e.error?.message ?? 'erreur inconnue';
-            console.warn('[realtime_server_error]', errMsg);
-            void remoteLog(
-              'agent',
-              'realtime_server_error',
-              `OpenAI Realtime error : ${errMsg.slice(0, 300)}`,
-              'error',
-              { rawEvent: event },
-            );
+          const now = Date.now();
+          switch (e?.type) {
+            case 'input_audio_buffer.speech_stopped':
+              lastSpeechStoppedAtMs = now;
+              break;
+            case 'conversation.item.input_audio_transcription.completed':
+              if (lastSpeechStoppedAtMs !== null) {
+                const delta = now - lastSpeechStoppedAtMs;
+                if (delta >= 0) serverTranscriptionDelayMs.push(delta);
+              }
+              break;
+            case 'response.created':
+              if (lastSpeechStoppedAtMs !== null) {
+                const delta = now - lastSpeechStoppedAtMs;
+                if (delta >= 0) serverEouDelayMs.push(delta);
+                // Reset après usage — la prochaine speech_stopped repartira
+                // d'une nouvelle baseline.
+                lastSpeechStoppedAtMs = null;
+              }
+              lastResponseCreatedAtMs = now;
+              firstAudioCapturedForResponse = false;
+              break;
+            case 'response.output_audio.delta':
+              // OpenAI envoie plusieurs deltas par réponse, on garde
+              // uniquement le 1er pour mesurer la latence "time to first
+              // audio chunk côté serveur".
+              if (!firstAudioCapturedForResponse && lastResponseCreatedAtMs !== null) {
+                const delta = now - lastResponseCreatedAtMs;
+                if (delta >= 0) serverFirstAudioDelayMs.push(delta);
+                firstAudioCapturedForResponse = true;
+              }
+              break;
+            case 'error': {
+              const errMsg = e.error?.message ?? 'erreur inconnue';
+              console.warn('[realtime_server_error]', errMsg);
+              void remoteLog(
+                'agent',
+                'realtime_server_error',
+                `OpenAI Realtime error : ${errMsg.slice(0, 300)}`,
+                'error',
+                { rawEvent: event },
+              );
+              break;
+            }
           }
         });
         return sess;
@@ -916,6 +984,7 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${loc
       // Mark the moment the session is ready — anything after this until the
       // first 'speaking' transition is the greeting latency.
       sessionStartedAtMs = Date.now();
+      tSessionStarted = sessionStartedAtMs;
       await sessionClosed;
     } finally {
       clearInterval(silenceWatcher);
@@ -947,6 +1016,12 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${loc
       const eou = stats(endOfUtteranceDelayMs);
       const trans = stats(transcriptionDelayMs);
       const wall = stats(wallclockTurnLatenciesMs);
+      // Métriques calculées depuis les events serveur OpenAI (cf. block
+      // LoggingRealtimeModel) — remplacent les eou/trans du SDK qui ne
+      // fire pas en mode Realtime.
+      const serverEou = stats(serverEouDelayMs);
+      const serverTrans = stats(serverTranscriptionDelayMs);
+      const serverFirstAudio = stats(serverFirstAudioDelayMs);
       const cacheHitRatio = inputTokensTotal > 0
         ? Math.round((cachedInputTokens / inputTokensTotal) * 100)
         : null;
@@ -954,18 +1029,41 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${loc
         ms == null ? '?' : `${(ms / 1000).toFixed(2)}s`;
       const fmtMs = (ms: number | null) => (ms == null ? '?' : `${ms}ms`);
 
+      // Préférer les métriques server-event quand dispo (Realtime mode),
+      // sinon fallback sur SDK eou_metrics (mode STT séparé, hypothétique).
+      const transMean = serverTrans.mean ?? trans.mean;
+      const eouMean = serverEou.mean ?? eou.mean;
+
+      // Phase breakdown (setup avant 1er audio) :
+      //   connect = ctx.connect() LiveKit room
+      //   sip = wait for SIP attributes (sip.trunkPhoneNumber)
+      //   config = fetch /api/agent/config + parse
+      //   session = session.start() (ouvre OpenAI WS + init session.update)
+      const setupConnect = tConnectDone - phaseT0;
+      const setupSip = tSipResolved - tConnectDone;
+      const setupConfig = tConfigFetched - tSipResolved;
+      const setupSession = tSessionStarted - tConfigFetched;
+      const setupTotal = tSessionStarted - phaseT0;
+
       const summary =
         `⏱️ TTFA: ${fmtMs(ttfa.mean)} mean · ${fmtMs(ttfa.p95)} p95 (${ttfa.count} resp) · ` +
         `Greeting: ${fmt(greetingMs)} · ` +
+        `Setup: ${fmtMs(setupTotal)} (connect ${fmtMs(setupConnect)} · sip ${fmtMs(setupSip)} · cfg ${fmtMs(setupConfig)} · sess ${fmtMs(setupSession)}) · ` +
         `Cache: ${cacheHitRatio == null ? 'n/a' : cacheHitRatio + '%'} hit · ` +
-        `Trans: ${fmtMs(trans.mean)} · EOU: ${fmtMs(eou.mean)}`;
+        `Trans: ${fmtMs(transMean)} · EOU: ${fmtMs(eouMean)} · ` +
+        `FirstAudio: ${fmtMs(serverFirstAudio.mean)}`;
 
       await remoteLog('latency', 'call_metrics', summary, 'info', {
         // Headline KPIs (the user-perceived numbers)
         ttfaMs: ttfa,
         responseDurationMs: dur,
         greetingMs,
-        // Breakdown KPIs
+        // Breakdown KPIs — server-event measurements (Realtime mode)
+        serverTranscriptionDelayMs: serverTrans,
+        serverEouDelayMs: serverEou,
+        serverFirstAudioDelayMs: serverFirstAudio,
+        // Legacy SDK metrics — laissés pour comparaison ; en Realtime mode
+        // ces arrays restent vides parce que le SDK ne mesure pas EOU/STT.
         endOfUtteranceDelayMs: eou,
         transcriptionDelayMs: trans,
         wallclockTurnLatenciesMs: wall,
@@ -978,8 +1076,18 @@ Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${loc
         // Routing context for filtering in /dashboard/logs
         fromNumber,
         toNumber,
+        // Setup phase breakdown : où le temps part avant le greeting.
+        setupMs: {
+          connect: setupConnect,
+          sipWait: setupSip,
+          configFetch: setupConfig,
+          sessionStart: setupSession,
+          total: setupTotal,
+        },
         // Raw arrays for power-user debug
         rawTtftMs: ttftMsList,
+        rawServerEouMs: serverEouDelayMs,
+        rawServerTransMs: serverTranscriptionDelayMs,
       });
       await remoteLog(
         'agent',
