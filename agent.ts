@@ -310,7 +310,27 @@ export default defineAgent<ProcessUserData>({
       },
     ];
 
+    type RealtimeCtorOptions = NonNullable<
+      ConstructorParameters<typeof openai.realtime.RealtimeModel>[0]
+    >;
+
+    // `maxResponseOutputTokens` existe sur `_options` (RealtimeOptions interne)
+    // mais le SDK ne l'expose pas dans la signature du constructeur. On le
+    // pose à la main sur `_options` après super() — il sera lu au moment de
+    // l'envoi de session.update par le SDK.
     class ReasoningProbeRealtimeModel extends openai.realtime.RealtimeModel {
+      constructor(
+        options: RealtimeCtorOptions & {
+          maxResponseOutputTokens?: number | 'inf';
+        },
+      ) {
+        const { maxResponseOutputTokens, ...rest } = options;
+        super(rest);
+        if (maxResponseOutputTokens !== undefined) {
+          this._options.maxResponseOutputTokens = maxResponseOutputTokens;
+        }
+      }
+
       override session(): openai.realtime.RealtimeSession {
         const sess = super.session();
         let variantIdx = 0;
@@ -427,19 +447,29 @@ export default defineAgent<ProcessUserData>({
         // temperature : deprecated dans l'API GA (renvoyait unknown_parameter
         // sur certaines combos). On laisse au défaut du modèle.
         speed: cfg.speed,
+        // Cap les tokens audio générés par réponse. Tenant-tunable via le
+        // dashboard (admin). Default 220 = ~30s d'audio, suffisant pour
+        // une phrase ou deux. Cap bas → l'agent finit sa réponse plus vite
+        // = moins de blanc avant le tour suivant.
+        maxResponseOutputTokens: cfg.maxResponseTokens,
         inputAudioTranscription: {
           model: REALTIME_CONFIG.transcriptionModel,
         },
-        // Optims latence (target : TTFA p50 ~750ms, p95 <1400ms) :
-        // - threshold plus haut → VAD plus confiant, moins de re-triggers
-        // - silence_duration_ms court → l'agent répond plus vite après que
-        //   la cliente a fini de parler
-        // - prefix_padding_ms réduit → moins de buffer avant détection
+        // Optims latence aggressives (cible : TTFA p50 ~550ms, p95 <1100ms) :
+        // - threshold 0.75 : VAD très confiant, ignore plus de bruits courts
+        // - silence_duration_ms 350 : l'agent répond ~130ms plus vite après
+        //   la fin de phrase user (vs 480 avant). Risque : si la cliente
+        //   prend une grosse respiration mid-phrase, l'agent peut couper.
+        //   Compensé par threshold haut qui filtre les hésitations courtes.
+        // - prefix_padding_ms 150 : moins de buffer avant détection (vs 250).
+        //   Économise ~100ms sur le démarrage de la transcription.
+        // - create_response: true : l'API génère la réponse directement à
+        //   la fin du tour user, sans attendre un trigger explicite.
         turnDetection: {
           type: 'server_vad',
-          threshold: 0.68,
-          prefix_padding_ms: 250,
-          silence_duration_ms: 480,
+          threshold: 0.75,
+          prefix_padding_ms: 150,
+          silence_duration_ms: 350,
           create_response: true,
         },
       }),
