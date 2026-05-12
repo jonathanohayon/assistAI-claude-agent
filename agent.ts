@@ -247,21 +247,98 @@ export default defineAgent<ProcessUserData>({
       { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
     );
 
-    // Note : tentative d'injection de reasoning_effort: "low" via session.update
-    // RETIRÉE — OpenAI Realtime renvoie "Unknown parameter:
-    // session.reasoning_effort" (la doc Python qui suggérait ce param ne
-    // s'applique pas à l'API Realtime, ou pas sous ce nom).
-    //
-    // On garde un listener léger sur openai_server_event_received pour
-    // logger les vraies erreurs OpenAI (utile en debug futur). Les optims
-    // qui MARCHENT vraiment sont turnDetection ci-dessous + le cache
-    // static-prefix → on est déjà à 93% cache hit, TTFA p95 ~1.5s.
-    class LoggingRealtimeModel extends openai.realtime.RealtimeModel {
+    // Tentative #2 reasoning_effort : on retest plusieurs shapes possibles
+    // au cas où OpenAI accepte une variante non documentée.
+    // Précédent essai avec `session.reasoning_effort` → rejeté par OpenAI
+    // ("Unknown parameter: session.reasoning_effort"). Cette fois on essaie
+    // 4 shapes différentes en cascade et on log laquelle OpenAI accepte
+    // (= pas d'event 'error' OpenAI dans les 2s suivantes).
+    const REASONING_VARIANTS: Array<{
+      label: string;
+      payload: Record<string, unknown>;
+    }> = [
+      // 1. Shape suggérée par doc Python (déjà rejetée mais on re-tente)
+      {
+        label: 'session.reasoning_effort',
+        payload: { type: 'realtime', reasoning_effort: 'low' },
+      },
+      // 2. Sub-objet reasoning (style Chat Completions GPT-5/o-series)
+      {
+        label: 'session.reasoning.effort',
+        payload: { type: 'realtime', reasoning: { effort: 'low' } },
+      },
+      // 3. À l'intérieur de model_settings
+      {
+        label: 'session.model_settings.reasoning_effort',
+        payload: {
+          type: 'realtime',
+          model_settings: { reasoning_effort: 'low' },
+        },
+      },
+      // 4. Au niveau audio.output (long shot — par cohérence avec voice/speed)
+      {
+        label: 'session.audio.output.reasoning_effort',
+        payload: {
+          type: 'realtime',
+          audio: { output: { reasoning_effort: 'low' } },
+        },
+      },
+    ];
+
+    class ReasoningProbeRealtimeModel extends openai.realtime.RealtimeModel {
       override session(): openai.realtime.RealtimeSession {
         const sess = super.session();
+        let variantIdx = 0;
+        let lastSentLabel: string | null = null;
+
         sess.on('openai_server_event_received', (event: unknown) => {
-          const e = event as { type?: string; error?: { message?: string } };
-          if (e?.type === 'error') {
+          const e = event as {
+            type?: string;
+            error?: { message?: string; param?: string };
+          };
+
+          // À session.created : envoie la 1re variante
+          if (e?.type === 'session.created') {
+            tryNextVariant();
+          }
+
+          // À chaque session.updated SANS error : variante acceptée !
+          if (e?.type === 'session.updated' && lastSentLabel) {
+            console.log(
+              `[reasoning_effort] ✅ ACCEPTED variant: ${lastSentLabel}`,
+            );
+            void remoteLog(
+              'agent',
+              'reasoning_effort_accepted',
+              `OpenAI a accepté la variante : ${lastSentLabel}`,
+              'info',
+              { variant: lastSentLabel },
+            );
+            lastSentLabel = null; // stop trying further
+          }
+
+          // À chaque error sur le param qu'on vient de tenter : essaie la suivante
+          if (e?.type === 'error' && lastSentLabel) {
+            const errMsg = e.error?.message ?? 'erreur inconnue';
+            const param = e.error?.param ?? '';
+            console.warn(
+              `[reasoning_effort] ❌ ${lastSentLabel} rejected: ${errMsg}`,
+            );
+            void remoteLog(
+              'agent',
+              'reasoning_effort_rejected',
+              `${lastSentLabel} rejeté : ${errMsg.slice(0, 200)}`,
+              'warn',
+              { variant: lastSentLabel, param, error: errMsg },
+            );
+            lastSentLabel = null;
+            // Tente la variante suivante après un court délai pour pas
+            // saturer OpenAI avec des updates back-to-back
+            setTimeout(tryNextVariant, 200);
+          }
+
+          // Erreur OpenAI non liée à notre probe → log standard
+          if (e?.type === 'error' && !lastSentLabel) {
             const errMsg = e.error?.message ?? 'erreur inconnue';
             console.warn('[realtime_server_error]', errMsg);
             void remoteLog(
@@ -273,13 +350,50 @@ export default defineAgent<ProcessUserData>({
             );
           }
         });
+
+        function tryNextVariant() {
+          if (variantIdx >= REASONING_VARIANTS.length) {
+            console.log(
+              '[reasoning_effort] ⛔ all variants rejected — abandoning',
+            );
+            void remoteLog(
+              'agent',
+              'reasoning_effort_exhausted',
+              `Toutes les variantes (${REASONING_VARIANTS.length}) ont été rejetées par OpenAI Realtime`,
+              'warn',
+              { variants: REASONING_VARIANTS.map((v) => v.label) },
+            );
+            return;
+          }
+          const variant = REASONING_VARIANTS[variantIdx];
+          if (!variant) return;
+          variantIdx++;
+          lastSentLabel = variant.label;
+          console.log(
+            `[reasoning_effort] testing variant ${variantIdx}/${REASONING_VARIANTS.length}: ${variant.label}`,
+          );
+          try {
+            sess.sendEvent({
+              type: 'session.update',
+              session: variant.payload,
+            } as never);
+          } catch (err) {
+            console.warn(
+              `[reasoning_effort] sendEvent threw for ${variant.label}:`,
+              (err as Error).message,
+            );
+            lastSentLabel = null;
+            setTimeout(tryNextVariant, 200);
+          }
+        }
+
         return sess;
       }
     }
 
     const session = new voice.AgentSession({
       vad,
-      llm: new LoggingRealtimeModel({
+      llm: new ReasoningProbeRealtimeModel({
         apiKey,
         baseURL: REALTIME_CONFIG.apiBase,
         model: cfg.model,
