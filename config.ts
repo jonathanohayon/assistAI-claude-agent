@@ -3,7 +3,13 @@
 // ou les paramètres du modèle realtime — pas besoin de toucher agent.ts.
 
 export const REALTIME_CONFIG = {
-  model: process.env['REALTIME_MODEL'] ?? 'gpt-realtime',
+  // 'gpt-realtime' (sans suffixe) n'existe PAS dans le catalog OpenAI — utilisé
+  // jusqu'au 12/05/26, ça crashait la session dès que /api/agent/config était
+  // injoignable (worker → fallback defaultConfig → ce modèle inexistant →
+  // model_not_found unhandled error → no voice).
+  // Modèles dispo confirmés via /v1/models : gpt-realtime-2 (latest premium),
+  // gpt-realtime-mini (low-cost), gpt-realtime-1.5.
+  model: process.env['REALTIME_MODEL'] ?? 'gpt-realtime-2',
   voice: process.env['REALTIME_VOICE'] ?? 'marin',
   // gpt-realtime-whisper : modèle de transcription dédié au Realtime API
   // (meilleur multilingue HE/FR/EN que whisper-1, tuned pour faible latence
