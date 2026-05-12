@@ -306,7 +306,14 @@ export default defineAgent<ProcessUserData>({
     const serverTranscriptionDelayMs: number[] = [];
     const serverEouDelayMs: number[] = [];
     const serverFirstAudioDelayMs: number[] = [];
-    let lastSpeechStoppedAtMs: number | null = null;
+    // 2 refs séparées : OpenAI envoie transcription.completed APRÈS
+    // response.created (Whisper async). Un seul ref nullé à response.created
+    // raterait transcription.completed. Un seul ref non-nullé risquerait la
+    // race au prochain speech_stopped (turn N+1 overwrite avant turn N
+    // transcription.completed arrive). Séparer = chaque event consomme sa
+    // ref et la nulle, et speech_stopped les re-pose toutes les deux.
+    let speechStoppedForEouMs: number | null = null;
+    let speechStoppedForTransMs: number | null = null;
     let lastResponseCreatedAtMs: number | null = null;
     let firstAudioCapturedForResponse = false;
 
@@ -323,21 +330,21 @@ export default defineAgent<ProcessUserData>({
           const now = Date.now();
           switch (e?.type) {
             case 'input_audio_buffer.speech_stopped':
-              lastSpeechStoppedAtMs = now;
+              speechStoppedForEouMs = now;
+              speechStoppedForTransMs = now;
               break;
             case 'conversation.item.input_audio_transcription.completed':
-              if (lastSpeechStoppedAtMs !== null) {
-                const delta = now - lastSpeechStoppedAtMs;
+              if (speechStoppedForTransMs !== null) {
+                const delta = now - speechStoppedForTransMs;
                 if (delta >= 0) serverTranscriptionDelayMs.push(delta);
+                speechStoppedForTransMs = null;
               }
               break;
             case 'response.created':
-              if (lastSpeechStoppedAtMs !== null) {
-                const delta = now - lastSpeechStoppedAtMs;
+              if (speechStoppedForEouMs !== null) {
+                const delta = now - speechStoppedForEouMs;
                 if (delta >= 0) serverEouDelayMs.push(delta);
-                // Reset après usage — la prochaine speech_stopped repartira
-                // d'une nouvelle baseline.
-                lastSpeechStoppedAtMs = null;
+                speechStoppedForEouMs = null;
               }
               lastResponseCreatedAtMs = now;
               firstAudioCapturedForResponse = false;
