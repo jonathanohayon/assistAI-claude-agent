@@ -272,118 +272,21 @@ export default defineAgent<ProcessUserData>({
       { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
     );
 
-    // Tentative #2 reasoning_effort : on retest plusieurs shapes possibles
-    // au cas où OpenAI accepte une variante non documentée.
-    // Précédent essai avec `session.reasoning_effort` → rejeté par OpenAI
-    // ("Unknown parameter: session.reasoning_effort"). Cette fois on essaie
-    // 4 shapes différentes en cascade et on log laquelle OpenAI accepte
-    // (= pas d'event 'error' OpenAI dans les 2s suivantes).
-    const REASONING_VARIANTS: Array<{
-      label: string;
-      payload: Record<string, unknown>;
-    }> = [
-      // 1. Shape suggérée par doc Python (déjà rejetée mais on re-tente)
-      {
-        label: 'session.reasoning_effort',
-        payload: { type: 'realtime', reasoning_effort: 'low' },
-      },
-      // 2. Sub-objet reasoning (style Chat Completions GPT-5/o-series)
-      {
-        label: 'session.reasoning.effort',
-        payload: { type: 'realtime', reasoning: { effort: 'low' } },
-      },
-      // 3. À l'intérieur de model_settings
-      {
-        label: 'session.model_settings.reasoning_effort',
-        payload: {
-          type: 'realtime',
-          model_settings: { reasoning_effort: 'low' },
-        },
-      },
-      // 4. Au niveau audio.output (long shot — par cohérence avec voice/speed)
-      {
-        label: 'session.audio.output.reasoning_effort',
-        payload: {
-          type: 'realtime',
-          audio: { output: { reasoning_effort: 'low' } },
-        },
-      },
-    ];
-
-    type RealtimeCtorOptions = NonNullable<
-      ConstructorParameters<typeof openai.realtime.RealtimeModel>[0]
-    >;
-
-    // `maxResponseOutputTokens` existe sur `_options` (RealtimeOptions interne)
-    // mais le SDK ne l'expose pas dans la signature du constructeur. On le
-    // pose à la main sur `_options` après super() — il sera lu au moment de
-    // l'envoi de session.update par le SDK.
-    class ReasoningProbeRealtimeModel extends openai.realtime.RealtimeModel {
-      constructor(
-        options: RealtimeCtorOptions & {
-          maxResponseOutputTokens?: number | 'inf';
-        },
-      ) {
-        const { maxResponseOutputTokens, ...rest } = options;
-        super(rest);
-        if (maxResponseOutputTokens !== undefined) {
-          this._options.maxResponseOutputTokens = maxResponseOutputTokens;
-        }
-      }
-
+    // Generic OpenAI server-error logger. Anciennement utilisé par la sonde
+    // reasoning_effort (4 variantes testées en cascade — toutes rejetées par
+    // OpenAI sur 4+ appels). La sonde a été retirée car les session.update
+    // invalides interrompaient la génération du greeting (réponse coupée à
+    // ~1s d'audio → cliente raccrochait). On garde uniquement le log des
+    // erreurs serveur pour debug futur.
+    class LoggingRealtimeModel extends openai.realtime.RealtimeModel {
       override session(): openai.realtime.RealtimeSession {
         const sess = super.session();
-        let variantIdx = 0;
-        let lastSentLabel: string | null = null;
-
         sess.on('openai_server_event_received', (event: unknown) => {
           const e = event as {
             type?: string;
             error?: { message?: string; param?: string };
           };
-
-          // À session.created : envoie la 1re variante
-          if (e?.type === 'session.created') {
-            tryNextVariant();
-          }
-
-          // À chaque session.updated SANS error : variante acceptée !
-          if (e?.type === 'session.updated' && lastSentLabel) {
-            console.log(
-              `[reasoning_effort] ✅ ACCEPTED variant: ${lastSentLabel}`,
-            );
-            void remoteLog(
-              'agent',
-              'reasoning_effort_accepted',
-              `OpenAI a accepté la variante : ${lastSentLabel}`,
-              'info',
-              { variant: lastSentLabel },
-            );
-            lastSentLabel = null; // stop trying further
-          }
-
-          // À chaque error sur le param qu'on vient de tenter : essaie la suivante
-          if (e?.type === 'error' && lastSentLabel) {
-            const errMsg = e.error?.message ?? 'erreur inconnue';
-            const param = e.error?.param ?? '';
-            console.warn(
-              `[reasoning_effort] ❌ ${lastSentLabel} rejected: ${errMsg}`,
-            );
-            void remoteLog(
-              'agent',
-              'reasoning_effort_rejected',
-              `${lastSentLabel} rejeté : ${errMsg.slice(0, 200)}`,
-              'warn',
-              { variant: lastSentLabel, param, error: errMsg },
-            );
-            lastSentLabel = null;
-            // Tente la variante suivante après un court délai pour pas
-            // saturer OpenAI avec des updates back-to-back
-            setTimeout(tryNextVariant, 200);
-          }
-
-          // Erreur OpenAI non liée à notre probe → log standard
-          if (e?.type === 'error' && !lastSentLabel) {
+          if (e?.type === 'error') {
             const errMsg = e.error?.message ?? 'erreur inconnue';
             console.warn('[realtime_server_error]', errMsg);
             void remoteLog(
@@ -395,50 +298,13 @@ export default defineAgent<ProcessUserData>({
             );
           }
         });
-
-        function tryNextVariant() {
-          if (variantIdx >= REASONING_VARIANTS.length) {
-            console.log(
-              '[reasoning_effort] ⛔ all variants rejected — abandoning',
-            );
-            void remoteLog(
-              'agent',
-              'reasoning_effort_exhausted',
-              `Toutes les variantes (${REASONING_VARIANTS.length}) ont été rejetées par OpenAI Realtime`,
-              'warn',
-              { variants: REASONING_VARIANTS.map((v) => v.label) },
-            );
-            return;
-          }
-          const variant = REASONING_VARIANTS[variantIdx];
-          if (!variant) return;
-          variantIdx++;
-          lastSentLabel = variant.label;
-          console.log(
-            `[reasoning_effort] testing variant ${variantIdx}/${REASONING_VARIANTS.length}: ${variant.label}`,
-          );
-          try {
-            sess.sendEvent({
-              type: 'session.update',
-              session: variant.payload,
-            } as never);
-          } catch (err) {
-            console.warn(
-              `[reasoning_effort] sendEvent threw for ${variant.label}:`,
-              (err as Error).message,
-            );
-            lastSentLabel = null;
-            setTimeout(tryNextVariant, 200);
-          }
-        }
-
         return sess;
       }
     }
 
     const session = new voice.AgentSession({
       vad,
-      llm: new ReasoningProbeRealtimeModel({
+      llm: new LoggingRealtimeModel({
         apiKey,
         baseURL: REALTIME_CONFIG.apiBase,
         model: cfg.model,
@@ -447,11 +313,10 @@ export default defineAgent<ProcessUserData>({
         // temperature : deprecated dans l'API GA (renvoyait unknown_parameter
         // sur certaines combos). On laisse au défaut du modèle.
         speed: cfg.speed,
-        // Cap les tokens audio générés par réponse. Tenant-tunable via le
-        // dashboard (admin). Default 220 = ~30s d'audio, suffisant pour
-        // une phrase ou deux. Cap bas → l'agent finit sa réponse plus vite
-        // = moins de blanc avant le tour suivant.
-        maxResponseOutputTokens: cfg.maxResponseTokens,
+        // maxResponseOutputTokens : SDK default = 'inf'. On a tenté un cap
+        // 220 (tunable depuis admin) le 12/05/26 — ça coupait le greeting
+        // mid-phrase. La longueur de réponse est désormais gouvernée
+        // uniquement par le prompt (cf. INSTRUCTIONS "max 1-2 phrases").
         inputAudioTranscription: {
           model: REALTIME_CONFIG.transcriptionModel,
         },
