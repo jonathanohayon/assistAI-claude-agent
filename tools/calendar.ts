@@ -1,6 +1,14 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+export interface ToolFeatures {
+  /** Calendar tools : list_available_dates, check_availability, book_appointment,
+   *  find_appointment, cancel_appointment, reschedule_appointment. */
+  calendar?: boolean;
+  /** CRM tools : save_contact + auto-save dans book_appointment. */
+  crm?: boolean;
+}
+
 export interface ToolContext {
   appUrl: string;
   /** E.164 number that was dialed — used by the web service to route to the
@@ -13,6 +21,9 @@ export interface ToolContext {
    *  via SIP attributes. The take_message tool reads it at invoke time so
    *  late-arriving attributes are picked up. Returns '' if unknown. */
   getCallerPhone?: () => string;
+  /** Plan features renvoyées par /api/agent/config. Pilotent quels tools
+   *  sont enregistrés. Si non fourni : tout activé (legacy). */
+  features?: ToolFeatures;
 }
 
 const makePost =
@@ -177,14 +188,17 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         return `Erreur réservation : ${data.error ?? 'inconnue'}`;
       }
 
-      // Auto-save contact to CRM (Sheet). Non-blocking: log but don't fail the booking.
-      const notes = `RDV ${date} ${time}${description ? ` — ${description}` : ''}`;
-      post('/api/sheets/contact', {
-        name,
-        phone,
-        email: email ?? undefined,
-        notes,
-      }).catch((e) => console.error('save_contact (auto) failed:', e));
+      // Auto-save contact au CRM (Sheet) UNIQUEMENT si la feature crm est
+      // activée pour ce plan. Non-blocking : log but don't fail the booking.
+      if (ctx.features?.crm !== false) {
+        const notes = `RDV ${date} ${time}${description ? ` — ${description}` : ''}`;
+        post('/api/sheets/contact', {
+          name,
+          phone,
+          email: email ?? undefined,
+          notes,
+        }).catch((e) => console.error('save_contact (auto) failed:', e));
+      }
 
       return data.summary ?? `RDV confirmé le ${date} à ${time} pour ${name}.`;
     },
@@ -295,14 +309,23 @@ export const makeCalendarTools = (ctx: ToolContext) => {
     },
   });
 
+  // take_message reste TOUJOURS dispo — c'est le fallback "laisser un
+  // message" qui ne dépend ni de calendar ni de CRM. Sans lui, un tenant
+  // sans calendrier serait muet face à toute demande non-RDV.
+  const calendarEnabled = ctx.features?.calendar !== false;
+  const crmEnabled = ctx.features?.crm !== false;
   return {
-    list_available_dates: listAvailableDates,
-    check_availability: checkAvailability,
-    book_appointment: bookAppointment,
-    save_contact: saveContact,
-    find_appointment: findAppointment,
-    cancel_appointment: cancelAppointment,
-    reschedule_appointment: rescheduleAppointment,
     take_message: takeMessage,
-  } as const;
+    ...(calendarEnabled
+      ? {
+          list_available_dates: listAvailableDates,
+          check_availability: checkAvailability,
+          book_appointment: bookAppointment,
+          find_appointment: findAppointment,
+          cancel_appointment: cancelAppointment,
+          reschedule_appointment: rescheduleAppointment,
+        }
+      : {}),
+    ...(crmEnabled ? { save_contact: saveContact } : {}),
+  };
 };

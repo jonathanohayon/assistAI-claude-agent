@@ -59,6 +59,15 @@ const requireEnv = (key: string): string => {
   return value;
 };
 
+// Map plan × feature renvoyée par /api/agent/config (cf. lib/plan-features
+// côté web). Clés inconnues ignorées — on lit défensivement avec ?? false.
+interface AgentFeatures {
+  calendar?: boolean;
+  crm?: boolean;
+  whatsapp_confirm?: boolean;
+  whatsapp_recap?: boolean;
+}
+
 interface FetchedConfig {
   instructions: string;
   greetingInstructions: string;
@@ -67,6 +76,7 @@ interface FetchedConfig {
   temperature: number;
   speed: number;
   maxResponseTokens: number;
+  features: AgentFeatures;
 }
 
 interface TranscriptEntry {
@@ -100,11 +110,25 @@ const fetchConfig = async (calledNumber: string): Promise<FetchedConfig> => {
       temperature: data.temperature ?? REALTIME_CONFIG.temperature,
       speed: data.speed ?? REALTIME_CONFIG.speed,
       maxResponseTokens: data.maxResponseTokens ?? 220,
+      // Si le web n'a pas (encore) déployé le champ features, on
+      // ouvre tout par défaut (mode legacy = plan premium implicite).
+      features: data.features ?? DEFAULT_FEATURES,
     };
   } catch (e) {
     console.warn(`[config] fetch failed (${(e as Error).message}), using defaults`);
     return defaultConfig();
   }
+};
+
+// Permissif par défaut — si le fetch échoue ou si l'admin n'a pas encore
+// configuré la matrice, le tenant garde toutes les capacités au lieu de
+// se retrouver muet (failure-open). C'est volontaire : un trial qui perd
+// silencieusement ses tools serait dur à diagnostiquer.
+const DEFAULT_FEATURES: AgentFeatures = {
+  calendar: true,
+  crm: true,
+  whatsapp_confirm: true,
+  whatsapp_recap: true,
 };
 
 const defaultConfig = (): FetchedConfig => ({
@@ -115,6 +139,7 @@ const defaultConfig = (): FetchedConfig => ({
   temperature: REALTIME_CONFIG.temperature,
   speed: REALTIME_CONFIG.speed,
   maxResponseTokens: 220,
+  features: DEFAULT_FEATURES,
 });
 
 // Push a structured event to the web service's central log. Best-effort:
@@ -819,6 +844,14 @@ Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
       // shows the local format directly.
       getCallerPhone: () =>
         fromNumber.startsWith('+972') ? '0' + fromNumber.slice(4) : fromNumber,
+      // Plan features → drive quels tools sont enregistrés (calendar/crm).
+      // Si le tenant a calendar=false, le modèle ne verra même pas les
+      // tools check_availability/book_appointment/... et ne pourra donc
+      // pas les hallucinate.
+      features: {
+        calendar: cfg.features.calendar !== false,
+        crm: cfg.features.crm !== false,
+      },
     });
 
     // Current date/time in Jerusalem — injected so the LLM can resolve
