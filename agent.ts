@@ -247,53 +247,21 @@ export default defineAgent<ProcessUserData>({
       { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
     );
 
-    // Sub-classe RealtimeModel pour injecter reasoning_effort: "low" dès que
-    // OpenAI confirme la création de la session. Le SDK Node n'expose pas
-    // reasoningEffort dans le constructeur (uniquement Python pour le
-    // moment), donc on passe par un raw session.update via sendEvent dès
-    // qu'on reçoit l'event 'session.created' sur le canal openai_server_event_received.
-    // Gain attendu : TTFT du modèle réduit significativement (moins de
-    // tokens de raisonnement avant le 1er token audio).
-    class LowReasoningRealtimeModel extends openai.realtime.RealtimeModel {
+    // Note : tentative d'injection de reasoning_effort: "low" via session.update
+    // RETIRÉE — OpenAI Realtime renvoie "Unknown parameter:
+    // session.reasoning_effort" (la doc Python qui suggérait ce param ne
+    // s'applique pas à l'API Realtime, ou pas sous ce nom).
+    //
+    // On garde un listener léger sur openai_server_event_received pour
+    // logger les vraies erreurs OpenAI (utile en debug futur). Les optims
+    // qui MARCHENT vraiment sont turnDetection ci-dessous + le cache
+    // static-prefix → on est déjà à 93% cache hit, TTFA p95 ~1.5s.
+    class LoggingRealtimeModel extends openai.realtime.RealtimeModel {
       override session(): openai.realtime.RealtimeSession {
         const sess = super.session();
-        // Trace TOUS les server events critiques pour debug : session.created,
-        // session.updated, error. Permet de vérifier que reasoning_effort
-        // est accepté (session.updated avec nos champs) ou rejeté (error).
         sess.on('openai_server_event_received', (event: unknown) => {
           const e = event as { type?: string; error?: { message?: string } };
-          if (e?.type === 'session.created') {
-            try {
-              // NB : `session.type: "realtime"` est requis par OpenAI sur
-              // tout session.update (sinon missing_required_parameter).
-              sess.sendEvent({
-                type: 'session.update',
-                session: {
-                  type: 'realtime',
-                  reasoning_effort: 'low',
-                },
-              } as never);
-              console.log(
-                '[reasoning_effort] applied "low" via session.update',
-              );
-              void remoteLog(
-                'agent',
-                'reasoning_effort_applied',
-                'reasoning_effort: low envoyé via session.update',
-                'info',
-              );
-            } catch (err) {
-              const msg = (err as Error).message;
-              console.warn('[reasoning_effort] failed to apply:', msg);
-              void remoteLog(
-                'agent',
-                'reasoning_effort_failed',
-                `Échec envoi session.update : ${msg.slice(0, 200)}`,
-                'warn',
-                { error: msg },
-              );
-            }
-          } else if (e?.type === 'error') {
+          if (e?.type === 'error') {
             const errMsg = e.error?.message ?? 'erreur inconnue';
             console.warn('[realtime_server_error]', errMsg);
             void remoteLog(
@@ -311,7 +279,7 @@ export default defineAgent<ProcessUserData>({
 
     const session = new voice.AgentSession({
       vad,
-      llm: new LowReasoningRealtimeModel({
+      llm: new LoggingRealtimeModel({
         apiKey,
         baseURL: REALTIME_CONFIG.apiBase,
         model: cfg.model,
