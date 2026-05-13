@@ -309,13 +309,19 @@ export const makeCalendarTools = (ctx: ToolContext) => {
     },
   });
 
-  // take_message reste TOUJOURS dispo — c'est le fallback "laisser un
-  // message" qui ne dépend ni de calendar ni de CRM. Sans lui, un tenant
-  // sans calendrier serait muet face à toute demande non-RDV.
+  // take_message retiré du toolset 2026-05-13. Le tool causait un bug
+  // SDK ("expected only one message generation") quand le LLM combinait
+  // filler audio + tool call → l'agent stallait silencieusement. Les
+  // messages sont désormais transmis post-call via le summary
+  // for_owner généré par /api/calls/end (déjà envoyé en WhatsApp au
+  // proprio, contient toute la conversation structurée). Le persona doit
+  // dire "je transmets ton message" puis end_call — aucun tool mid-call.
+  // La fonction takeMessage et l'endpoint /api/whatsapp/notify restent
+  // dispo dans le code au cas où on les ressuscite.
+  void takeMessage; // marqué utilisé pour ESLint, sans l'enregistrer comme tool
   const calendarEnabled = ctx.features?.calendar !== false;
   const crmEnabled = ctx.features?.crm !== false;
   return {
-    take_message: takeMessage,
     ...(calendarEnabled
       ? {
           list_available_dates: listAvailableDates,
