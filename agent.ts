@@ -709,13 +709,18 @@ export default defineAgent<ProcessUserData>({
     });
 
     // Greeting: prefer the tenant's stored greetingInstructions (editable
-    // from /dashboard). Fall back to a generic prompt that asks the LLM to
-    // derive the greeting from the persona system prompt — keeps things
-    // working for tenants who haven't filled in the field.
+    // from /dashboard). Quand le tenant a rempli ce champ, le contenu est
+    // la phrase d'accueil LITTÉRALE qu'on attend de la voix agent — pas
+    // une directive. Sans wrapping explicite, le modèle traite ce
+    // greetingInstructions comme un brief et improvise ("הבנתי, אני
+    // אשמח לעזור..." au lieu de "שלום, כאן רוברט..."). On force donc le
+    // "say textually" via prefix multi-langue qui couvre fr/he/en. Le
+    // fallback (champ vide en DB) reste une directive ouverte parce qu'il
+    // n'y a pas de phrase précise à prononcer.
     const customGreeting = cfg.greetingInstructions?.trim();
     const greetInstructions =
       customGreeting && customGreeting.length > 0
-        ? customGreeting
+        ? `Prononce TEXTUELLEMENT, mot pour mot et dans la même langue, la phrase d'accueil ci-dessous. N'ajoute, ne reformule, ne paraphrase RIEN. Dis exactement ceci puis attends la réponse de l'interlocuteur :\n\n"""\n${customGreeting}\n"""`
         : `Salue chaleureusement la cliente en te présentant : utilise ton prénom et le nom du centre tels que définis dans tes instructions système. Demande poliment comment tu peux l'aider. Si la cliente répond en hébreu, bascule en hébreu pour la suite de l'échange.`;
 
     // Programmatic language enforcement. gpt-realtime-mini has strong
