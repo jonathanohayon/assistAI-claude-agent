@@ -783,7 +783,7 @@ export default defineAgent<ProcessUserData>({
 **RÈGLE DE FIN D'APPEL — OBLIGATOIRE**
 Quand la conversation est CLAIREMENT terminée — la cliente a dit "au revoir / merci / à bientôt / shalom", OU le RDV est pris et elle n'a plus rien à ajouter, OU elle a raccroché verbalement — tu DOIS :
 
-1. Dire ta phrase de clôture chaleureuse ("Au revoir Sarah, à très vite !")
+1. Dire ta phrase de clôture chaleureuse (ex. "Au revoir, à très vite !" ou avec le prénom de la cliente uniquement si elle te l'a donné dans la conversation)
 2. **Immédiatement** après, appeler le tool \`end_call\` avec un argument \`reason\` court (\`rdv_pris\`, \`rdv_annulé\`, \`info_donnée\`, \`client_raccroche\`, etc.)
 
 Ne JAMAIS attendre que la cliente raccroche elle-même — c'est ton rôle de clôturer la ligne. Si tu oublies d'appeler end_call, la cliente reste connectée pour rien et continue de payer la communication.
