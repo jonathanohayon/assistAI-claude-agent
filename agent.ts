@@ -17,8 +17,10 @@ import {
   voice,
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
-import * as silero from '@livekit/agents-plugin-silero';
-import * as aic from '@livekit/plugins-ai-coustics';
+// silero + ai-coustics retirés : tournaient sur le CPU worker qui
+// saturait (logs "inference is slower than realtime"). OpenAI Realtime
+// gère server_vad pour la détection de tour et inputAudioNoiseReduction
+// (near_field) pour le débruitage — pas de CPU côté worker.
 import { RoomEvent } from '@livekit/rtc-node';
 import { RoomServiceClient } from 'livekit-server-sdk';
 import { z } from 'zod';
@@ -49,9 +51,9 @@ const END_CALL_TRAILING_MS = 600;
 // pre-empt them.
 const SILENCE_GRACE_START_MS = 10_000;
 
-type ProcessUserData = {
-  vad?: silero.VAD;
-};
+// Le worker n'a plus de state de prewarm partagé (Silero retiré). On
+// garde le générique pour stabilité d'API au cas où on en ajouterait.
+type ProcessUserData = Record<string, never>;
 
 const requireEnv = (key: string): string => {
   const value = process.env[key];
@@ -250,14 +252,22 @@ const waitForCalledNumber = async (
 };
 
 export default defineAgent<ProcessUserData>({
-  prewarm: async (proc) => {
-    proc.userData.vad = await silero.VAD.load();
+  // Silero VAD désactivé : en Realtime mode, OpenAI gère server_vad pour
+  // la détection de tour. Le Silero local servait uniquement à
+  // l'interrupt detection. Sur le worker Railway, son inférence saturait
+  // le CPU (logs "inference is slower than realtime delay=2800ms")
+  // créant un backlog audio qui décalait TOUT le pipeline :
+  //   - greeting 33s (au lieu de ~2s)
+  //   - détection user speech/silence en retard de 3s
+  //   - agent réagit aux mauvais moments
+  // Les events OpenAI input_audio_buffer.speech_started / stopped
+  // suffisent pour gérer l'interrupt côté agent SDK.
+  prewarm: async () => {
+    // no-op (anciennement chargeait Silero VAD)
   },
 
   entry: async (ctx: JobContext<ProcessUserData>) => {
     const apiKey = process.env['REALTIME_API_KEY'] ?? requireEnv('OPENAI_API_KEY');
-    const vad = ctx.proc.userData.vad;
-    if (!vad) throw new Error('Silero VAD non préchargé.');
 
     // Phase timings — Date.now() pris à chaque transition pour identifier
     // exactement où le temps passe entre l'entry() et le moment où le
@@ -388,7 +398,8 @@ export default defineAgent<ProcessUserData>({
     }
 
     const session = new voice.AgentSession({
-      vad,
+      // Pas de VAD local (Silero retiré car saturait le CPU du worker).
+      // OpenAI server_vad gère la détection de tour côté serveur.
       llm: new LoggingRealtimeModel({
         apiKey,
         baseURL: REALTIME_CONFIG.apiBase,
@@ -405,6 +416,13 @@ export default defineAgent<ProcessUserData>({
         inputAudioTranscription: {
           model: REALTIME_CONFIG.transcriptionModel,
         },
+        // Noise reduction server-side OpenAI — gratuit, tuned pour audio
+        // téléphonique (mono μ-law 8kHz upsampled par Twilio). Remplace
+        // ai-coustics qui tournait sur le worker et consommait du CPU
+        // (voir aussi : Silero retiré pour la même raison). near_field
+        // est l'option pour mic proche (téléphone), far_field pour
+        // micro de salle.
+        inputAudioNoiseReduction: { type: "near_field" },
         // Optims latence aggressives (cible : TTFA p50 ~550ms, p95 <1100ms) :
         // - threshold 0.75 : VAD très confiant, ignore plus de bruits courts
         // - silence_duration_ms 350 : l'agent répond ~130ms plus vite après
@@ -929,14 +947,13 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
       await session.start({
         agent,
         room: ctx.room,
-        // ai-coustics noise cancellation. Cleans up background noise (street,
-        // ventilation, music, kids) coming from the caller before it reaches
-        // the LLM. Drastically improves recognition on noisy phone calls.
-        // The default model (rookS) is tuned for low-latency telephony; pass
-        // `model: 'quailL'` for higher quality at the cost of CPU.
-        inputOptions: {
-          noiseCancellation: aic.audioEnhancement(),
-        },
+        // ai-coustics noise cancellation retirée — tournait sur le CPU du
+        // worker qui était saturé (Silero VAD + ai-coustics). On bascule
+        // sur la noise reduction server-side OpenAI (cf.
+        // inputAudioNoiseReduction: near_field configurée sur le
+        // RealtimeModel ci-dessus). Bénéfices : 0 CPU worker, mêmes
+        // résultats sur audio téléphonique, tuning server-side mis à jour
+        // par OpenAI automatiquement.
       });
       // Mark the moment the session is ready — anything after this until the
       // first 'speaking' transition is the greeting latency.
