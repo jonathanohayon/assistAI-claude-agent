@@ -720,8 +720,8 @@ export default defineAgent<ProcessUserData>({
     const customGreeting = cfg.greetingInstructions?.trim();
     const greetInstructions =
       customGreeting && customGreeting.length > 0
-        ? `Prononce TEXTUELLEMENT, mot pour mot et dans la même langue, la phrase d'accueil ci-dessous. N'ajoute, ne reformule, ne paraphrase RIEN. Dis exactement ceci puis attends la réponse de l'interlocuteur :\n\n"""\n${customGreeting}\n"""`
-        : `Salue chaleureusement la cliente en te présentant : utilise ton prénom et le nom du centre tels que définis dans tes instructions système. Demande poliment comment tu peux l'aider. Si la cliente répond en hébreu, bascule en hébreu pour la suite de l'échange.`;
+        ? `Commence ta première réponse en prononçant TEXTUELLEMENT, mot pour mot et dans la même langue, la phrase d'accueil ci-dessous (entre triple guillemets). Ne reformule pas, ne paraphrase pas cette phrase. PUIS, dans la même réponse vocale (même tour, sans attendre que l'interlocuteur parle), enchaîne directement avec la PREMIÈRE étape de ton persona/workflow — par exemple poser la question d'ouverture (« comment puis-je vous aider », « quel est votre nom », etc.) si ton persona l'exige. Reste fluide, comme un humain qui se présente et embraye sur sa première question naturellement.\n\nPhrase d'accueil littérale :\n"""\n${customGreeting}\n"""`
+        : `Salue chaleureusement la cliente en te présentant : utilise ton prénom et le nom du centre tels que définis dans tes instructions système. Enchaîne immédiatement avec la première question/étape de ton persona — ne te contente pas d'un "comment puis-je vous aider", suis ce que ton persona décrit (ex. demander le nom). Si la cliente répond en hébreu, bascule en hébreu pour la suite de l'échange.`;
 
     // Programmatic language enforcement. gpt-realtime-mini has strong
     // language inertia — once warm on FR, it tends to keep replying FR
