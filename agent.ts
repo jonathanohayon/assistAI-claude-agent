@@ -651,7 +651,7 @@ export default defineAgent<ProcessUserData>({
     // ── end_call tool — exposed to the LLM ──────────────────────────────
     const endCallTool = llm.tool({
       description:
-        "Termine l'appel proprement. À appeler UNIQUEMENT après avoir dit au revoir, quand la conversation est conclue (RDV pris/annulé/déplacé, info donnée et plus rien à demander, ou client a explicitement raccroché verbalement). Ne PAS appeler en plein milieu d'un échange.",
+        "Termine l'appel proprement. À appeler UNIQUEMENT APRÈS avoir dit au revoir À VOIX HAUTE EN UNE SEULE PHRASE, quand la conversation est conclue (RDV pris/annulé/déplacé, info donnée et plus rien à demander, ou client a explicitement raccroché verbalement). Ne PAS appeler en plein milieu d'un échange. IMPORTANT : APRÈS l'appel à end_call, NE GÉNÈRE AUCUNE NOUVELLE RÉPONSE VOCALE — la ligne est en train de se fermer, tout son émis sera coupé.",
       parameters: z.object({
         reason: z
           .string()
@@ -699,7 +699,12 @@ export default defineAgent<ProcessUserData>({
           );
           finish('hard_cap');
         }, END_CALL_HARD_CAP_MS);
-        return 'Au revoir.';
+        // Non-conversationnel exprès : si on retourne "Au revoir.", OpenAI
+        // génère une nouvelle réponse vocale BASÉE sur ce résultat et
+        // répète "Au revoir" 1-2 fois de plus avant la fermeture. Avec un
+        // statut technique entre parenthèses + un guard sentence "ne parle
+        // pas", le modèle s'abstient (testé : 3x → 1x au revoir).
+        return '(call_closed) Ne génère aucune nouvelle réponse vocale, la ligne est en cours de fermeture.';
       },
     });
 
@@ -783,8 +788,9 @@ export default defineAgent<ProcessUserData>({
 **RÈGLE DE FIN D'APPEL — OBLIGATOIRE**
 Quand la conversation est CLAIREMENT terminée — la cliente a dit "au revoir / merci / à bientôt / shalom", OU le RDV est pris et elle n'a plus rien à ajouter, OU elle a raccroché verbalement — tu DOIS :
 
-1. Dire ta phrase de clôture chaleureuse (ex. "Au revoir, à très vite !" ou avec le prénom de la cliente uniquement si elle te l'a donné dans la conversation)
+1. Dire ta phrase de clôture chaleureuse **UNE SEULE FOIS** (ex. "Au revoir, à très vite !" ou avec le prénom de la cliente uniquement si elle te l'a donné dans la conversation)
 2. **Immédiatement** après, appeler le tool \`end_call\` avec un argument \`reason\` court (\`rdv_pris\`, \`rdv_annulé\`, \`info_donnée\`, \`client_raccroche\`, etc.)
+3. **APRÈS l'appel à end_call : NE PRODUIRE AUCUNE NOUVELLE RÉPONSE VOCALE.** Le tool result ne doit déclencher aucun "au revoir" supplémentaire ni aucune phrase de courtoisie. La ligne se ferme, tout son émis sera coupé. Reste silencieux.
 
 Ne JAMAIS attendre que la cliente raccroche elle-même — c'est ton rôle de clôturer la ligne. Si tu oublies d'appeler end_call, la cliente reste connectée pour rien et continue de payer la communication.
 
