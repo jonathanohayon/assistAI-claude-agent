@@ -77,6 +77,10 @@ interface FetchedConfig {
   speed: number;
   maxResponseTokens: number;
   features: AgentFeatures;
+  // Template injecté en chatCtx au début de chaque appel. Contient des
+  // placeholders runtime : {date_fr}, {iso_date}, {time}, {caller_hint_block}.
+  // Édité depuis /admin (web). Vide → fallback hardcoded ci-dessous.
+  perCallContextTemplate?: string;
 }
 
 interface TranscriptEntry {
@@ -113,6 +117,12 @@ const fetchConfig = async (calledNumber: string): Promise<FetchedConfig> => {
       // Si le web n'a pas (encore) déployé le champ features, on
       // ouvre tout par défaut (mode legacy = plan premium implicite).
       features: data.features ?? DEFAULT_FEATURES,
+      // Vide si le web n'a pas (encore) ce champ → fallback ci-dessous
+      // dans la composition du PER_CALL_CONTEXT. exactOptionalPropertyTypes
+      // refuse 'undefined' explicite ; on omet la clé si vide.
+      ...(data.perCallContextTemplate !== undefined
+        ? { perCallContextTemplate: data.perCallContextTemplate }
+        : {}),
     };
   } catch (e) {
     console.warn(`[config] fetch failed (${(e as Error).message}), using defaults`);
@@ -783,25 +793,6 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
-    // Hard-coded suffix appended to every tenant's instructions. The realtime
-    // model often forgets to invoke end_call after a polite goodbye; this
-    // section is short, prescriptive, and always present so the LLM knows
-    // exactly when and how to hang up.
-    const HANGUP_DIRECTIVE = `
-
-──────────────────────────────────────────
-**RÈGLE DE FIN D'APPEL — OBLIGATOIRE**
-Quand la conversation est CLAIREMENT terminée — la cliente a dit "au revoir / merci / à bientôt / shalom", OU le RDV est pris et elle n'a plus rien à ajouter, OU elle a raccroché verbalement — tu DOIS :
-
-1. Dire ta phrase de clôture chaleureuse **UNE SEULE FOIS** (ex. "Au revoir, à très vite !" ou avec le prénom de la cliente uniquement si elle te l'a donné dans la conversation)
-2. **Immédiatement** après, appeler le tool \`end_call\` avec un argument \`reason\` court (\`rdv_pris\`, \`rdv_annulé\`, \`info_donnée\`, \`client_raccroche\`, etc.)
-3. **APRÈS l'appel à end_call : NE PRODUIRE AUCUNE NOUVELLE RÉPONSE VOCALE.** Le tool result ne doit déclencher aucun "au revoir" supplémentaire ni aucune phrase de courtoisie. La ligne se ferme, tout son émis sera coupé. Reste silencieux.
-
-Ne JAMAIS attendre que la cliente raccroche elle-même — c'est ton rôle de clôturer la ligne. Si tu oublies d'appeler end_call, la cliente reste connectée pour rien et continue de payer la communication.
-
-Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
-──────────────────────────────────────────`;
-
     // Bind the calendar/sheets tools to THIS tenant's dialed number so they
     // hit the right Google Calendar/Sheet on the web service. Without this,
     // the routes fall back to the admin's credentials (= cross-tenant leak).
@@ -863,85 +854,18 @@ Ne PAS appeler end_call en plein milieu d'un échange ou sur la moindre pause.
       return { dateFr, time, isoDate };
     })();
 
-    const dateContextBlock = `
-
-──────────────────────────────────────────
-**CONTEXTE TEMPOREL (Asia/Jerusalem)**
-- Aujourd'hui : ${nowJerusalem.dateFr} (\`${nowJerusalem.isoDate}\`)
-- Heure locale : ${nowJerusalem.time}
-- Fuseau de référence : Asia/Jerusalem (toutes les dates et heures que tu manipules sont dans ce fuseau)
-
-Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → calcule la date YYYY-MM-DD à partir d'aujourd'hui ci-dessus AVANT d'appeler un tool. Ne demande JAMAIS la date complète à la cliente, ce serait étrange ("c'est quel jour aujourd'hui ?").
-──────────────────────────────────────────`;
-
-    // Hard-coded directive on how to PRONOUNCE times to the customer.
-    // The realtime TTS reads "09:00" literally as "zéro neuf zéro zéro" —
-    // unnatural. We instruct it to convert to spoken French/Hebrew before
-    // speaking, while keeping HH:MM in the tool args.
-    const SPOKEN_TIME_DIRECTIVE = `
-
-──────────────────────────────────────────
-**PRONONCIATION DES HEURES — IMPORTANT**
-Quand tu lis une heure à VOIX HAUTE à la cliente, formate-la naturellement. NE LIS JAMAIS le format \`HH:MM\` littéral, ça donne "zéro neuf zéro zéro" — c'est moche.
-
-En français :
-- \`09:00\` → "neuf heures" (ou "neuf heures du matin" si ambigu)
-- \`09:30\` → "neuf heures et demie" ou "neuf heures trente"
-- \`10:15\` → "dix heures et quart"
-- \`11:45\` → "midi moins le quart"
-- \`12:00\` → "midi"
-- \`12:30\` → "midi et demi"
-- \`13:00\` → "treize heures" ou "une heure de l'après-midi"
-- \`18:00\` → "six heures du soir" ou "dix-huit heures"
-
-En hébreu :
-- \`09:00\` → "תשע בבוקר"
-- \`09:30\` → "תשע וחצי"
-- \`12:00\` → "שתים-עשרה בצהריים"
-- \`18:00\` → "שש בערב"
-
-Quand tu PASSES une heure à un tool (\`book_appointment\`, etc.), garde le format \`HH:MM\` dans les arguments — c'est uniquement la prononciation orale qui change.
-──────────────────────────────────────────`;
-
     // Convert E.164 to Israeli local format for both speaking AND tool args.
     // +972585001007 → 0585001007. Customers dictate local format, store in
-    // local format, agent reads local format. Other country codes stay as-is
-    // (the SPOKEN_PHONE_DIRECTIVE handles digit-by-digit pronunciation).
+    // local format, agent reads local format.
     const localFromNumber = fromNumber.startsWith('+972')
       ? '0' + fromNumber.slice(4)
       : fromNumber;
 
-    // Hard directive on how to PRONOUNCE phone numbers. Realtime models
-    // default to compound numbers ("cinq cent quatre-vingt-cinq mille…")
-    // which is unintelligible. Force digit-by-digit.
-    const SPOKEN_PHONE_DIRECTIVE = `
-
-──────────────────────────────────────────
-**PRONONCIATION DES NUMÉROS DE TÉLÉPHONE — IMPORTANT**
-Quand tu lis un numéro de téléphone à VOIX HAUTE :
-1. JAMAIS l'indicatif international (\`+972\`, \`+33\`, etc.) — utilise toujours le format local israélien (commence par \`0\`).
-2. Lis CHIFFRE PAR CHIFFRE, jamais comme un grand nombre. \`0585001007\` se lit "zéro, cinq, huit, cinq, zéro, zéro, un, zéro, zéro, sept" — PAS "cinq cent quatre-vingt-cinq mille…".
-3. Groupe par paires pour la fluidité : \`05 85 00 10 07\` → "zéro cinq, huit cinq, zéro zéro, un zéro, zéro sept" avec une micro-pause entre chaque paire.
-
-En hébreu, même logique : chiffre par chiffre, groupé par paires.
-- \`0585001007\` → "אפס חמש, שמונה חמש, אפס אפס, אחת אפס, אפס שבע"
-
-En anglais : "zero five, eight five, zero zero, one zero, zero seven".
-
-Cette règle s'applique à TOUS les numéros que tu énonces — celui qui appelle, celui qu'une cliente te dicte pour confirmation, etc.
-──────────────────────────────────────────`;
-
     // Inject the caller's number (when known) so the LLM proposes it for
-    // confirmation instead of asking blind. We don't blindly trust it —
-    // sometimes a customer calls from a relative's phone, so the LLM must
-    // confirm before using it. Withheld/private numbers leave fromNumber
-    // empty → no hint → LLM asks like before.
-    const callerHint = localFromNumber
-      ? `
-
-──────────────────────────────────────────
-**NUMÉRO DU CLIENT (détecté via l'appel)**
-Le numéro qui appelle est : \`${localFromNumber}\` (format local, à utiliser tel quel pour les tools).
+    // confirmation instead of asking blind. Withheld/private numbers leave
+    // fromNumber empty → no hint → LLM asks like before.
+    const callerHintBlock = localFromNumber
+      ? `Le numéro qui appelle est : \`${localFromNumber}\` (format local, à utiliser tel quel pour les tools).
 
 Avant d'utiliser ce numéro pour un tool (\`book_appointment\`, \`save_contact\`, etc.), CONFIRME-le avec la cliente — formule courte du genre :
   « Je note le rendez-vous au numéro qui appelle, le \`${localFromNumber}\`, c'est bien le bon ? »
@@ -952,27 +876,42 @@ Rappel : prononce chiffre par chiffre par paires (voir directive ci-dessus), pas
 - Si elle confirme → utilise \`${localFromNumber}\` dans le champ \`phone\`.
 - Si elle te donne un AUTRE numéro (elle appelle depuis le tel de sa mère, du bureau, etc.) → utilise celui qu'elle te dicte.
 
-Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${localFromNumber}\` pour confirmation d'abord, ça gagne du temps.
-──────────────────────────────────────────`
-      : '';
+Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${localFromNumber}\` pour confirmation d'abord, ça gagne du temps.`
+      : '(Pas de numéro caller détecté — caller-ID withheld. Demande à la cliente son numéro normalement.)';
 
-    // Cache-friendly assembly : everything in `instructions` MUST be
-    // identical across calls for the same tenant (= maximize OpenAI prompt
-    // cache hits, which dramatically reduce TTFT and cost). The dynamic
-    // bits (today's date, caller phone) are injected as a system message
-    // in chatCtx via TenantAgent.onEnter — they live AFTER the cached
-    // prefix so they don't break the cache.
-    // Order matters for the prompt cache : SHARED directives (identiques
-    // entre TOUS les tenants) en TÊTE → cross-tenant cache hit. La partie
-    // tenant-specific (cfg.instructions) vient ensuite — son cache reste
-    // valide pour les appels du même tenant uniquement, mais le préfixe
-    // shared est cacheable globalement quand on aura plusieurs salons.
-    const STATIC_INSTRUCTIONS =
-      SPOKEN_TIME_DIRECTIVE +
-      SPOKEN_PHONE_DIRECTIVE +
-      HANGUP_DIRECTIVE +
-      cfg.instructions;
-    const PER_CALL_CONTEXT = dateContextBlock + callerHint;
+    // Fallback hardcodé si le web ne renvoie pas perCallContextTemplate
+    // (ex. version /api/agent/config trop ancienne). Identique au default
+    // côté web (lib/agent-prompt-defaults.ts DEFAULT_PER_CALL_CONTEXT_TEMPLATE).
+    const FALLBACK_PCC_TEMPLATE = `
+──────────────────────────────────────────
+**CONTEXTE TEMPOREL (Asia/Jerusalem)**
+- Aujourd'hui : {date_fr} (\`{iso_date}\`)
+- Heure locale : {time}
+- Fuseau de référence : Asia/Jerusalem (toutes les dates et heures que tu manipules sont dans ce fuseau)
+
+Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → calcule la date YYYY-MM-DD à partir d'aujourd'hui ci-dessus AVANT d'appeler un tool. Ne demande JAMAIS la date complète à la cliente, ce serait étrange ("c'est quel jour aujourd'hui ?").
+──────────────────────────────────────────
+
+──────────────────────────────────────────
+**NUMÉRO DU CLIENT (détecté via l'appel)**
+{caller_hint_block}
+──────────────────────────────────────────`;
+
+    // Substitue les placeholders runtime dans le template per-call (édité
+    // depuis /admin). Si le placeholder est absent, no-op silencieux.
+    const pccTemplate = cfg.perCallContextTemplate?.trim() || FALLBACK_PCC_TEMPLATE;
+    const PER_CALL_CONTEXT = pccTemplate
+      .replaceAll('{date_fr}', nowJerusalem.dateFr)
+      .replaceAll('{iso_date}', nowJerusalem.isoDate)
+      .replaceAll('{time}', nowJerusalem.time)
+      .replaceAll('{caller_hint_block}', callerHintBlock);
+
+    // cfg.instructions vient déjà mergé depuis /api/agent/config — il inclut
+    // les directives système (spoken_time, spoken_phone, hangup), la persona
+    // tenant, la langue, et les règles admin par plan. On l'utilise direct.
+    // Le worker ne hardcode plus aucun bloc système : tout est pilotable
+    // depuis /admin.
+    const STATIC_INSTRUCTIONS = cfg.instructions;
 
     const agent = new TenantAgent({
       instructions: STATIC_INSTRUCTIONS,
