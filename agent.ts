@@ -17,10 +17,14 @@ import {
   voice,
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
-// silero + ai-coustics retirés : tournaient sur le CPU worker qui
-// saturait (logs "inference is slower than realtime"). OpenAI Realtime
-// gère server_vad pour la détection de tour et inputAudioNoiseReduction
-// (near_field) pour le débruitage — pas de CPU côté worker.
+// silero + ai-coustics retirés (saturaient le CPU worker). Noise cancellation
+// repassée sur LiveKit Krisp via @livekit/noise-cancellation-node — mode
+// TelephonyBackgroundVoiceCancellation, tuné spécifiquement pour audio
+// SIP/téléphonie 8kHz mono. Krisp WASM est généralement plus optimisé
+// que ai-coustics côté CPU. À monitorer post-deploy : si le worker
+// re-sature (cf. logs "inference is slower than realtime"), revenir au
+// near_field OpenAI tout court ou upgrader le plan Railway.
+import { TelephonyBackgroundVoiceCancellation } from '@livekit/noise-cancellation-node';
 import { RoomEvent } from '@livekit/rtc-node';
 import { RoomServiceClient } from 'livekit-server-sdk';
 import { z } from 'zod';
@@ -947,13 +951,13 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
       await session.start({
         agent,
         room: ctx.room,
-        // ai-coustics noise cancellation retirée — tournait sur le CPU du
-        // worker qui était saturé (Silero VAD + ai-coustics). On bascule
-        // sur la noise reduction server-side OpenAI (cf.
-        // inputAudioNoiseReduction: near_field configurée sur le
-        // RealtimeModel ci-dessus). Bénéfices : 0 CPU worker, mêmes
-        // résultats sur audio téléphonique, tuning server-side mis à jour
-        // par OpenAI automatiquement.
+        inputOptions: {
+          // LiveKit Krisp tuned téléphonie. Combine bien avec OpenAI
+          // inputAudioNoiseReduction:near_field côté server (double
+          // pass : 1er nettoyage côté worker via Krisp/LiveKit, 2e
+          // côté OpenAI server VAD). À monitorer CPU.
+          noiseCancellation: TelephonyBackgroundVoiceCancellation(),
+        },
       });
       // Mark the moment the session is ready — anything after this until the
       // first 'speaking' transition is the greeting latency.
