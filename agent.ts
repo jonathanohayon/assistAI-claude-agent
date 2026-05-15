@@ -1135,7 +1135,11 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
         try {
           rtSess.sendEvent({
             type: 'session.update',
-            session: { temperature: cfg.temperature },
+            // session.type "realtime" est REQUIRED par l'API GA d'OpenAI
+            // depuis ~2025 (typing SDK l'a en optional mais le runtime
+            // renvoie "Missing required parameter: 'session.type'." si
+            // omis — cf. logs Railway 2026-05-15).
+            session: { type: 'realtime', temperature: cfg.temperature },
           });
           console.log(
             `[session.update] temperature attempt: ${cfg.temperature}`,
