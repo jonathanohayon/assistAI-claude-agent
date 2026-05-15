@@ -864,12 +864,15 @@ export default defineAgent<ProcessUserData>({
         ? `« ${cfg.agentName.trim()} »`
         : 'défini dans tes instructions système';
     // Fallback per-plan édité depuis /admin (cf. settings.GREETING_FALLBACK_TEMPLATE_BY_PLAN).
-    // Si vide (admin n'a rien renseigné), on tombe sur un fallback minimal en dur
-    // — purement structurel, juste assez pour que l'agent dise un mot et embraye.
+    // CHANGEMENT (2026-05-15) : si l'admin n'a rien renseigné ET le tenant
+    // n'a pas de greeting_instructions, on N'INJECTE RIEN — le persona du
+    // tenant gère lui-même sa première réponse. Avant on injectait un
+    // fallback hardcoded "Salue par ton prénom..." qui override silencieusement
+    // les personae customs (ex. REGLE_STRICTE répète X mot pour mot).
     const adminFallback =
       cfg.greetingFallbackTemplate && cfg.greetingFallbackTemplate.trim().length > 0
         ? cfg.greetingFallbackTemplate.replace(/\{agent_name\}/g, namePart)
-        : `Salue brièvement l'interlocuteur en te présentant par ton prénom ${namePart}, puis enchaîne sur la première étape de ton workflow.`;
+        : '';
     const greetInstructions =
       customGreeting && customGreeting.length > 0
         ? `Commence ta première réponse en prononçant TEXTUELLEMENT, mot pour mot et dans la même langue, la phrase d'accueil ci-dessous (entre triple guillemets). Ne reformule pas, ne paraphrase pas cette phrase. PUIS, dans la même réponse vocale (même tour, sans attendre que l'interlocuteur parle), enchaîne directement avec la PREMIÈRE étape de ton persona/workflow — par exemple poser la question d'ouverture (« comment puis-je vous aider », « quel est votre nom », etc.) si ton persona l'exige. Reste fluide, comme un humain qui se présente et embraye sur sa première question naturellement.\n\nPhrase d'accueil littérale :\n"""\n${customGreeting}\n"""`
@@ -897,9 +900,18 @@ export default defineAgent<ProcessUserData>({
           ctx.addMessage({ role: 'system', content: PER_CALL_CONTEXT });
           await this.updateChatCtx(ctx);
         }
-        await this.session.generateReply({
-          instructions: greetInstructions,
-        });
+        // Si greetInstructions est vide (= ni tenant greeting_instructions ni
+        // admin greeting_fallback_template renseignés), on appelle quand même
+        // generateReply pour déclencher la première réponse, MAIS sans
+        // override d'instructions. Le LLM ouvre selon son persona system
+        // prompt seul — exactement ce que le tenant a configuré.
+        if (greetInstructions.length > 0) {
+          await this.session.generateReply({
+            instructions: greetInstructions,
+          });
+        } else {
+          await this.session.generateReply();
+        }
       }
 
       override async onUserTurnCompleted(
