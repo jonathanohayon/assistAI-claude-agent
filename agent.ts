@@ -226,6 +226,11 @@ const postCallEnd = async (
   transcript: TranscriptEntry[],
   fromNumber: string,
   toNumber: string,
+  /** Pour les sessions web (Phase 2), on a pas de toNumber/fromNumber SIP.
+   *  Sans userId, /api/calls/end fallback sur resolveDefaultTenant → leak
+   *  cross-tenant (le call de jonathanohayon1 atterrit chez patriciaelfassy1).
+   *  On passe donc explicitement l'userId pour éviter cette confusion. */
+  userId?: string,
 ) => {
   const appUrl = process.env['APP_URL'];
   const secret = process.env['INTERNAL_SECRET'];
@@ -244,7 +249,12 @@ const postCallEnd = async (
         'Content-Type': 'application/json',
         'x-internal-secret': secret,
       },
-      body: JSON.stringify({ fromNumber, toNumber, transcript }),
+      body: JSON.stringify({
+        fromNumber,
+        toNumber,
+        transcript,
+        ...(userId ? { userId } : {}),
+      }),
       signal: AbortSignal.timeout(30_000),
     });
     const body = await res.text();
@@ -617,7 +627,12 @@ export default defineAgent<ProcessUserData>({
     const triggerRecap = async () => {
       if (recapSent) return;
       recapSent = true;
-      await postCallEnd(transcript, fromNumber, toNumber);
+      await postCallEnd(
+        transcript,
+        fromNumber,
+        toNumber,
+        origin.kind === 'web' ? origin.userId : undefined,
+      );
     };
 
     // ── Auto-hangup ─────────────────────────────────────────────────────
