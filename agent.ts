@@ -17,14 +17,15 @@ import {
   voice,
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
-// silero + ai-coustics retirés (saturaient le CPU worker). Noise cancellation
-// repassée sur LiveKit Krisp via @livekit/noise-cancellation-node — mode
-// TelephonyBackgroundVoiceCancellation, tuné spécifiquement pour audio
-// SIP/téléphonie 8kHz mono. Krisp WASM est généralement plus optimisé
-// que ai-coustics côté CPU. À monitorer post-deploy : si le worker
-// re-sature (cf. logs "inference is slower than realtime"), revenir au
-// near_field OpenAI tout court ou upgrader le plan Railway.
-import { TelephonyBackgroundVoiceCancellation } from '@livekit/noise-cancellation-node';
+// 2026-05-15 : retour à ai-coustics avec **Quail Voice Focus 2.1 L**
+// (modèle 20 MB, window 15ms, latence 30ms, optimisé CPU temps réel).
+// Battu Krisp Telephony sur WER de 81% sur 7 STT en bench interne
+// (AssemblyAI/Deepgram/Soniox/Mistral/Cartesia/Gladia/Speechmatics).
+// ⚠️ ai-coustics avait été retiré le 10/05 pour saturation CPU sur
+// l'ancien modèle. QVF 2.1 L est ≈4× plus léger — à monitorer post-deploy
+// via logs "inference is slower than realtime". Si re-sature, fallback :
+// model "quailVfS" (5.3 MB, même fenêtre 15ms) puis Krisp Telephony.
+import { audioEnhancement } from '@livekit/plugins-ai-coustics';
 import { RoomEvent } from '@livekit/rtc-node';
 import { RoomServiceClient } from 'livekit-server-sdk';
 import { z } from 'zod';
@@ -421,10 +422,9 @@ export default defineAgent<ProcessUserData>({
           model: REALTIME_CONFIG.transcriptionModel,
         },
         // Noise reduction server-side OpenAI — gratuit, tuned pour audio
-        // téléphonique (mono μ-law 8kHz upsampled par Twilio). Remplace
-        // ai-coustics qui tournait sur le worker et consommait du CPU
-        // (voir aussi : Silero retiré pour la même raison). near_field
-        // est l'option pour mic proche (téléphone), far_field pour
+        // téléphonique (mono μ-law 8kHz upsampled par Twilio). 2e pass
+        // après QVF 2.1 L côté worker (cf. inputOptions.noiseCancellation
+        // plus bas). near_field = mic proche (téléphone), far_field =
         // micro de salle.
         inputAudioNoiseReduction: { type: "near_field" },
         // Optims latence aggressives (cible : TTFA p50 ~550ms, p95 <1100ms) :
@@ -952,11 +952,25 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
         agent,
         room: ctx.room,
         inputOptions: {
-          // LiveKit Krisp tuned téléphonie. Combine bien avec OpenAI
-          // inputAudioNoiseReduction:near_field côté server (double
-          // pass : 1er nettoyage côté worker via Krisp/LiveKit, 2e
-          // côté OpenAI server VAD). À monitorer CPU.
-          noiseCancellation: TelephonyBackgroundVoiceCancellation(),
+          // ai-coustics Quail Voice Focus 2.1 L — isolation primary
+          // speaker en temps réel. Combine avec OpenAI server-side
+          // inputAudioNoiseReduction:near_field (double pass : QVF
+          // côté worker, near_field côté Realtime).
+          //   - enhancementLevel 0.8 = équilibré (0.5 conservateur,
+          //     1.0 agressif ; 0.8 recommandé pour téléphonie).
+          //   - VAD inhérent au modèle, tuné pour réponse rapide
+          //     (speechHoldDuration 30ms, sensitivity 6.0).
+          // Auth : LiveKit Cloud (notre setup) → pas besoin de license_key
+          // ai-coustics séparée, c'est le plan-livekit-cloud qui couvre.
+          noiseCancellation: audioEnhancement({
+            model: 'quailVfL',
+            modelParameters: { enhancementLevel: 0.8 },
+            vadSettings: {
+              speechHoldDuration: 0.03,
+              sensitivity: 6.0,
+              minimumSpeechDuration: 0.0,
+            },
+          }),
         },
       });
       // Mark the moment the session is ready — anything after this until the
