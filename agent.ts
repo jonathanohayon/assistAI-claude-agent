@@ -432,12 +432,12 @@ export default defineAgent<ProcessUserData>({
         inputAudioTranscription: {
           model: REALTIME_CONFIG.transcriptionModel,
         },
-        // Noise reduction server-side OpenAI — gratuit, tuned pour audio
-        // téléphonique (mono μ-law 8kHz upsampled par Twilio). 2e pass
-        // après QVF 2.1 L côté worker (cf. inputOptions.noiseCancellation
-        // plus bas). near_field = mic proche (téléphone), far_field =
-        // micro de salle.
-        inputAudioNoiseReduction: { type: "near_field" },
+        // inputAudioNoiseReduction RETIRÉ — ai-coustics Quail Voice
+        // Focus 2.1 L (cf. inputOptions.noiseCancellation plus bas)
+        // gère toute la noise reduction côté worker AVANT que l'audio
+        // atteigne OpenAI. Double pass redondant + ajoutait ~5-10ms
+        // de latence inutile + altérait parfois la queue de phonèmes
+        // déjà bien isolée par QVF.
         // Optims latence aggressives (cible : TTFA p50 ~550ms, p95 <1100ms) :
         // - threshold 0.75 : VAD très confiant, ignore plus de bruits courts
         // - silence_duration_ms 350 : l'agent répond ~130ms plus vite après
@@ -963,10 +963,9 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
         agent,
         room: ctx.room,
         inputOptions: {
-          // ai-coustics Quail Voice Focus 2.1 L — isolation primary
-          // speaker en temps réel. Combine avec OpenAI server-side
-          // inputAudioNoiseReduction:near_field (double pass : QVF
-          // côté worker, near_field côté Realtime).
+          // ai-coustics Quail Voice Focus 2.1 L — UNIQUE étage de
+          // noise reduction côté tel (OpenAI near_field désactivé
+          // plus haut pour éviter double pass redondant).
           //   - enhancementLevel dérivé du slider 1-10 (cf. /dashboard
           //     "Réduction de bruit") : 1 ≈ 0.1 (quasi-passthrough),
           //     8 ≈ 0.8 (équilibré, recommandé téléphonie), 10 = 1.0
