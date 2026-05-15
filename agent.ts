@@ -82,6 +82,9 @@ interface FetchedConfig {
    *  fallback greeting pour éviter qu'un persona sans nom de centre
    *  pousse le LLM à halluciner un nom fictif. */
   agentName: string;
+  /** Template per-plan injecté quand `greetingInstructions` est vide.
+   *  Édité depuis /admin par l'admin. Placeholders : `{agent_name}`. */
+  greetingFallbackTemplate: string;
   model: string;
   voice: string;
   temperature: number;
@@ -143,6 +146,10 @@ const fetchConfig = async (origin: SessionOrigin): Promise<FetchedConfig> => {
       temperature: data.temperature ?? REALTIME_CONFIG.temperature,
       speed: data.speed ?? REALTIME_CONFIG.speed,
       maxResponseTokens: data.maxResponseTokens ?? 220,
+      greetingFallbackTemplate:
+        typeof data.greetingFallbackTemplate === 'string'
+          ? data.greetingFallbackTemplate
+          : '',
       // Slider 1-10 ; si /api/agent/config n'a pas encore le champ (DB
       // pas migrée ou ancien deploy), fallback sur 8 = enhancementLevel
       // 0.8 (équilibré).
@@ -187,6 +194,7 @@ const defaultConfig = (): FetchedConfig => ({
   speed: REALTIME_CONFIG.speed,
   maxResponseTokens: 220,
   noiseReductionLevel: 8,
+  greetingFallbackTemplate: '',
   features: DEFAULT_FEATURES,
 });
 
@@ -850,20 +858,22 @@ export default defineAgent<ProcessUserData>({
     // fallback (champ vide en DB) reste une directive ouverte parce qu'il
     // n'y a pas de phrase précise à prononcer.
     const customGreeting = cfg.greetingInstructions?.trim();
-    // Nom de l'agent : champ DB `agent_name` (facultatif) prioritaire ;
-    // sinon "défini dans tes instructions système" (le LLM extrait le nom
-    // de ton persona). On évite ainsi d'imposer un schéma "centre de
-    // beauté" hardcoded qui pousserait le LLM à halluciner un nom de
-    // centre fictif quand le persona n'en a pas (ex. assistant personnel
-    // d'un individu, persona médical, persona service IT, etc.).
+    // Nom de l'agent à substituer dans le template fallback admin.
     const namePart =
       cfg.agentName && cfg.agentName.trim().length > 0
         ? `« ${cfg.agentName.trim()} »`
-        : "défini dans tes instructions système";
+        : 'défini dans tes instructions système';
+    // Fallback per-plan édité depuis /admin (cf. settings.GREETING_FALLBACK_TEMPLATE_BY_PLAN).
+    // Si vide (admin n'a rien renseigné), on tombe sur un fallback minimal en dur
+    // — purement structurel, juste assez pour que l'agent dise un mot et embraye.
+    const adminFallback =
+      cfg.greetingFallbackTemplate && cfg.greetingFallbackTemplate.trim().length > 0
+        ? cfg.greetingFallbackTemplate.replace(/\{agent_name\}/g, namePart)
+        : `Salue brièvement l'interlocuteur en te présentant par ton prénom ${namePart}, puis enchaîne sur la première étape de ton workflow.`;
     const greetInstructions =
       customGreeting && customGreeting.length > 0
         ? `Commence ta première réponse en prononçant TEXTUELLEMENT, mot pour mot et dans la même langue, la phrase d'accueil ci-dessous (entre triple guillemets). Ne reformule pas, ne paraphrase pas cette phrase. PUIS, dans la même réponse vocale (même tour, sans attendre que l'interlocuteur parle), enchaîne directement avec la PREMIÈRE étape de ton persona/workflow — par exemple poser la question d'ouverture (« comment puis-je vous aider », « quel est votre nom », etc.) si ton persona l'exige. Reste fluide, comme un humain qui se présente et embraye sur sa première question naturellement.\n\nPhrase d'accueil littérale :\n"""\n${customGreeting}\n"""`
-        : `Salue chaleureusement l'interlocuteur en te présentant par ton prénom ${namePart}. N'INVENTE PAS de nom de structure, d'entreprise, de centre ou de cabinet : si ton persona en mentionne un (ex. "centre Prestige", "salon X"), reprends EXACTEMENT ce nom ; sinon, présente-toi simplement par ton prénom sans rien y rattacher. Enchaîne immédiatement avec la première étape de ton persona/workflow (cf. tes instructions système) — pas de "comment puis-je vous aider" générique. Respecte le genre de ton persona. Adapte-toi à la langue de l'interlocuteur dès qu'il/elle parle.`;
+        : adminFallback;
 
     // Programmatic language enforcement. gpt-realtime-mini has strong
     // language inertia — once warm on FR, it tends to keep replying FR
