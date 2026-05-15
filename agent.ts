@@ -98,16 +98,30 @@ interface TranscriptEntry {
   text: string;
 }
 
-const fetchConfig = async (calledNumber: string): Promise<FetchedConfig> => {
+/**
+ * Source de la session :
+ *  - "sip"   : appel Twilio entrant, on lit `sip.trunkPhoneNumber`
+ *  - "web"   : LiveTest depuis le navigateur (Phase 2), userId via metadata
+ *  - "unknown" : ni l'un ni l'autre — fallback default tenant
+ */
+type SessionOrigin =
+  | { kind: 'sip'; calledNumber: string }
+  | { kind: 'web'; userId: string }
+  | { kind: 'unknown' };
+
+const fetchConfig = async (origin: SessionOrigin): Promise<FetchedConfig> => {
   const appUrl = process.env['APP_URL'];
   if (!appUrl) {
     console.warn('[config] APP_URL not set, using compiled defaults');
     return defaultConfig();
   }
   try {
-    const url = calledNumber
-      ? `${appUrl}/api/agent/config?phone=${encodeURIComponent(calledNumber)}`
-      : `${appUrl}/api/agent/config`;
+    const url =
+      origin.kind === 'sip'
+        ? `${appUrl}/api/agent/config?phone=${encodeURIComponent(origin.calledNumber)}`
+        : origin.kind === 'web'
+          ? `${appUrl}/api/agent/config?userId=${encodeURIComponent(origin.userId)}`
+          : `${appUrl}/api/agent/config`;
     const res = await fetch(url, {
       signal: AbortSignal.timeout(5_000),
     });
@@ -248,23 +262,46 @@ const sipFromOf = (p: { attributes: Record<string, string>; identity: string }):
 const sipToOf = (p: { attributes: Record<string, string> }): string =>
   p.attributes['sip.trunkPhoneNumber'] ?? '';
 
-// Poll the SIP participant's attributes for the dialed number. LiveKit
-// sets `sip.trunkPhoneNumber` once the participant is published, which can
-// arrive a beat after `connect()` returns. Time-bounded so we never block
-// the call for too long — fall back to default tenant if unset.
-const waitForCalledNumber = async (
+/**
+ * Lit `participant.metadata` (JSON) pour détecter un participant web
+ * (Phase 2 LiveTest routing). Format émis par /api/livekit/web-token :
+ * `{ "source": "web", "userId": "<uuid>" }`. Retourne userId si trouvé,
+ * sinon null. Silent sur metadata invalide pour ne pas crasher l'agent.
+ */
+const webUserIdOf = (p: { metadata?: string }): string | null => {
+  if (!p.metadata) return null;
+  try {
+    const parsed = JSON.parse(p.metadata) as { source?: string; userId?: string };
+    if (parsed.source === 'web' && typeof parsed.userId === 'string') {
+      return parsed.userId;
+    }
+  } catch {
+    // metadata absente ou pas JSON → pas un participant web
+  }
+  return null;
+};
+
+// Détecte l'origine de la session (SIP Twilio ou Web LiveTest) en
+// pollant les remoteParticipants jusqu'à ce que les attributes / metadata
+// arrivent (le SDK LiveKit les publie un beat après `connect()`).
+// Time-bounded pour ne jamais bloquer un appel — fallback "unknown".
+const detectOrigin = async (
   ctx: JobContext<ProcessUserData>,
   timeoutMs: number,
-): Promise<string> => {
+): Promise<SessionOrigin> => {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     for (const [, p] of ctx.room.remoteParticipants) {
-      const t = sipToOf(p);
-      if (t) return t;
+      // 1. SIP attributes (Twilio)
+      const calledNumber = sipToOf(p);
+      if (calledNumber) return { kind: 'sip', calledNumber };
+      // 2. Web metadata (Phase 2 LiveTest)
+      const userId = webUserIdOf(p);
+      if (userId) return { kind: 'web', userId };
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  return '';
+  return { kind: 'unknown' };
 };
 
 export default defineAgent<ProcessUserData>({
@@ -297,22 +334,28 @@ export default defineAgent<ProcessUserData>({
     await ctx.connect(undefined, AutoSubscribe.SUBSCRIBE_ALL);
     tConnectDone = Date.now();
 
-    // Resolve the called number BEFORE fetching config so we can route to
-    // the right tenant. SIP participant attributes arrive shortly after the
-    // room connects — wait briefly for them. Réduit de 3s → 1.5s : sur les
-    // tests prod les attrs SIP arrivent en <500ms. Au-delà de 1.5s on
-    // tombe sur le fallback default-tenant (cas admin web test).
-    const calledNumber = await waitForCalledNumber(ctx, 1_500);
+    // Résout l'origine (SIP Twilio ou Web LiveTest) AVANT le fetch config.
+    // Les attributes/metadata arrivent un beat après `connect()` — on
+    // wait briefly. Réduit à 1.5s : sur les tests prod les attrs SIP
+    // arrivent en <500ms. Au-delà de 1.5s on tombe sur 'unknown' →
+    // fetchConfig fallback default-tenant.
+    const origin = await detectOrigin(ctx, 1_500);
     tSipResolved = Date.now();
+    const originLabel =
+      origin.kind === 'sip'
+        ? `SIP ${origin.calledNumber}`
+        : origin.kind === 'web'
+          ? `Web user ${origin.userId}`
+          : '(origine inconnue)';
     await remoteLog(
       'agent',
       'call_started',
-      `Appel reçu sur ${calledNumber || '(numéro inconnu)'}`,
+      `Session démarrée — ${originLabel}`,
       'info',
-      { calledNumber, roomName: ctx.room.name },
+      { origin, roomName: ctx.room.name },
     );
 
-    const cfg = await fetchConfig(calledNumber);
+    const cfg = await fetchConfig(origin);
     tConfigFetched = Date.now();
     await remoteLog(
       'agent',
@@ -461,7 +504,7 @@ export default defineAgent<ProcessUserData>({
     // ── Transcript capture ──────────────────────────────────────────────
     const transcript: TranscriptEntry[] = [];
     let fromNumber = '';
-    let toNumber = calledNumber;
+    let toNumber = origin.kind === 'sip' ? origin.calledNumber : '';
     let recapSent = false;
 
     const captureNumbers = (p: {
@@ -503,6 +546,24 @@ export default defineAgent<ProcessUserData>({
       return '';
     };
 
+    // Pour les sessions web (LiveTest navigateur), publish chaque turn sur
+    // le data channel de la room afin que la UI navigateur puisse afficher
+    // la transcription en temps réel. Pas applicable côté SIP (Twilio
+    // n'écoute pas le data channel). Encodage JSON utf-8 simple.
+    const publishWebTranscript = (entry: TranscriptEntry) => {
+      if (origin.kind !== 'web') return;
+      try {
+        const payload = new TextEncoder().encode(
+          JSON.stringify({ type: 'transcript', ...entry }),
+        );
+        // reliable = true : l'utilisateur préfère un texte qui arrive un
+        // peu plus tard plutôt que des bouts perdus.
+        ctx.room.localParticipant?.publishData(payload, { reliable: true });
+      } catch (err) {
+        console.warn('[web_transcript] publish failed:', (err as Error).message);
+      }
+    };
+
     // Belt & braces: realtime models commit final user turns via
     // ConversationItemAdded too, but UserInputTranscribed is the canonical
     // STT-style event. Keep both, dedupe by skipping empty text.
@@ -510,7 +571,9 @@ export default defineAgent<ProcessUserData>({
       if (!ev.isFinal) return;
       const text = (ev.transcript ?? '').trim();
       if (!text) return;
-      transcript.push({ role: 'user', text });
+      const entry: TranscriptEntry = { role: 'user', text };
+      transcript.push(entry);
+      publishWebTranscript(entry);
       // Cheap charset-based language sniff: log the dominant script so we
       // can verify after the fact that Hebrew turns are transcribed as
       // Hebrew, not as French gibberish (whisper-1 used to do that).
@@ -536,7 +599,12 @@ export default defineAgent<ProcessUserData>({
       // Dedupe vs the parallel UserInputTranscribed stream.
       const last = transcript[transcript.length - 1];
       if (last && last.role === item.role && last.text === text) return;
-      transcript.push({ role: item.role as 'user' | 'assistant', text });
+      const entry: TranscriptEntry = {
+        role: item.role as 'user' | 'assistant',
+        text,
+      };
+      transcript.push(entry);
+      publishWebTranscript(entry);
     });
 
     // ── End-of-call recap ───────────────────────────────────────────────
