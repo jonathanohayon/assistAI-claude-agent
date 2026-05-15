@@ -422,9 +422,15 @@ export default defineAgent<ProcessUserData>({
 
     // Generic OpenAI server-event listener : capture les timings clés pour
     // l'instrumentation latence, et log les errors serveur.
+    // Captured ref vers la RealtimeSession active pour pouvoir lui
+    // envoyer des ClientEvent custom (session.update temperature à chaud,
+    // notamment). Set par LoggingRealtimeModel.session() override.
+    let capturedRtSession: openai.realtime.RealtimeSession | null = null;
+
     class LoggingRealtimeModel extends openai.realtime.RealtimeModel {
       override session(): openai.realtime.RealtimeSession {
         const sess = super.session();
+        capturedRtSession = sess;
         sess.on('openai_server_event_received', (event: unknown) => {
           const e = event as {
             type?: string;
@@ -480,49 +486,50 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
+    // On garde une ref au LoggingRealtimeModel pour pouvoir lui envoyer
+    // un session.update à chaud après start (cf. plus bas — pilote la
+    // temperature même si le constructor refuse de la prendre).
+    const rtModel = new LoggingRealtimeModel({
+      apiKey,
+      baseURL: REALTIME_CONFIG.apiBase,
+      model: cfg.model,
+      modalities: [...REALTIME_CONFIG.modalities],
+      voice: cfg.voice,
+      // temperature : pas dans le constructor (deprecated dans GA), on
+      // tente un session.update à chaud après que la session se connecte.
+      speed: cfg.speed,
+      // maxResponseOutputTokens : SDK default = 'inf'. On a tenté un cap
+      // 220 (tunable depuis admin) le 12/05/26 — ça coupait le greeting
+      // mid-phrase. La longueur de réponse est désormais gouvernée
+      // uniquement par le prompt (cf. INSTRUCTIONS "max 1-2 phrases").
+      inputAudioTranscription: {
+        model: REALTIME_CONFIG.transcriptionModel,
+      },
+      // inputAudioNoiseReduction RETIRÉ — ai-coustics Quail Voice
+      // Focus 2.1 L (cf. inputOptions.noiseCancellation plus bas) gère
+      // toute la noise reduction côté worker AVANT que l'audio atteigne
+      // OpenAI. Double pass redondant + ajoutait ~5-10ms de latence
+      // inutile + altérait parfois la queue de phonèmes déjà bien isolée.
+      // Optims latence aggressives (cible : TTFA p50 ~550ms, p95 <1100ms) :
+      // - threshold 0.75 : VAD très confiant, ignore plus de bruits courts
+      // - silence_duration_ms 350 : l'agent répond ~130ms plus vite après
+      //   la fin de phrase user (vs 480 avant).
+      // - prefix_padding_ms 150 : moins de buffer avant détection.
+      // - create_response: true : l'API génère la réponse directement à
+      //   la fin du tour user, sans attendre un trigger explicite.
+      turnDetection: {
+        type: 'server_vad',
+        threshold: 0.75,
+        prefix_padding_ms: 150,
+        silence_duration_ms: 350,
+        create_response: true,
+      },
+    });
+
     const session = new voice.AgentSession({
       // Pas de VAD local (Silero retiré car saturait le CPU du worker).
       // OpenAI server_vad gère la détection de tour côté serveur.
-      llm: new LoggingRealtimeModel({
-        apiKey,
-        baseURL: REALTIME_CONFIG.apiBase,
-        model: cfg.model,
-        modalities: [...REALTIME_CONFIG.modalities],
-        voice: cfg.voice,
-        // temperature : deprecated dans l'API GA (renvoyait unknown_parameter
-        // sur certaines combos). On laisse au défaut du modèle.
-        speed: cfg.speed,
-        // maxResponseOutputTokens : SDK default = 'inf'. On a tenté un cap
-        // 220 (tunable depuis admin) le 12/05/26 — ça coupait le greeting
-        // mid-phrase. La longueur de réponse est désormais gouvernée
-        // uniquement par le prompt (cf. INSTRUCTIONS "max 1-2 phrases").
-        inputAudioTranscription: {
-          model: REALTIME_CONFIG.transcriptionModel,
-        },
-        // inputAudioNoiseReduction RETIRÉ — ai-coustics Quail Voice
-        // Focus 2.1 L (cf. inputOptions.noiseCancellation plus bas)
-        // gère toute la noise reduction côté worker AVANT que l'audio
-        // atteigne OpenAI. Double pass redondant + ajoutait ~5-10ms
-        // de latence inutile + altérait parfois la queue de phonèmes
-        // déjà bien isolée par QVF.
-        // Optims latence aggressives (cible : TTFA p50 ~550ms, p95 <1100ms) :
-        // - threshold 0.75 : VAD très confiant, ignore plus de bruits courts
-        // - silence_duration_ms 350 : l'agent répond ~130ms plus vite après
-        //   la fin de phrase user (vs 480 avant). Risque : si la cliente
-        //   prend une grosse respiration mid-phrase, l'agent peut couper.
-        //   Compensé par threshold haut qui filtre les hésitations courtes.
-        // - prefix_padding_ms 150 : moins de buffer avant détection (vs 250).
-        //   Économise ~100ms sur le démarrage de la transcription.
-        // - create_response: true : l'API génère la réponse directement à
-        //   la fin du tour user, sans attendre un trigger explicite.
-        turnDetection: {
-          type: 'server_vad',
-          threshold: 0.75,
-          prefix_padding_ms: 150,
-          silence_duration_ms: 350,
-          create_response: true,
-        },
-      }),
+      llm: rtModel,
     });
 
     // ── Transcript capture ──────────────────────────────────────────────
@@ -1108,6 +1115,42 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
           }),
         },
       });
+
+      // ── session.update à chaud — tentative temperature ─────────────────
+      // Le constructor RealtimeModel ne supporte pas (officiellement)
+      // temperature dans l'API GA. Mais le `session.update` event accepte
+      // un payload partiel — on tente d'envoyer cfg.temperature directement.
+      // Si OpenAI rejette, on verra un event `error` côté serveur (déjà
+      // loggé via le LoggingRealtimeModel ci-dessus). Si accepté, on aura
+      // un event `session.updated` confirmant. Dans les 2 cas la session
+      // continue (l'erreur ne kill pas la connexion).
+      //
+      // capturedRtSession est set par LoggingRealtimeModel.session() qui
+      // est appelé pendant session.start() — donc dispo à ce stade.
+      // Cast explicite : TS perd le type quand on assigne capturedRtSession
+      // depuis un closure (override method called externally), le narrowing
+      // `if (capturedRtSession)` n'est pas suffisant. On force le type.
+      const rtSess = capturedRtSession as openai.realtime.RealtimeSession | null;
+      if (rtSess) {
+        try {
+          rtSess.sendEvent({
+            type: 'session.update',
+            session: { temperature: cfg.temperature },
+          });
+          console.log(
+            `[session.update] temperature attempt: ${cfg.temperature}`,
+          );
+        } catch (e) {
+          console.warn(
+            `[session.update] temperature failed (sync error): ${(e as Error).message}`,
+          );
+        }
+      } else {
+        console.warn(
+          '[session.update] capturedRtSession null — temperature non envoyée',
+        );
+      }
+
       // Mark the moment the session is ready — anything after this until the
       // first 'speaking' transition is the greeting latency.
       sessionStartedAtMs = Date.now();
