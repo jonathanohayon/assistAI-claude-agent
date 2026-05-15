@@ -78,6 +78,10 @@ interface AgentFeatures {
 interface FetchedConfig {
   instructions: string;
   greetingInstructions: string;
+  /** Prénom de l'agent (facultatif, `agent_name` DB). Utilisé par le
+   *  fallback greeting pour éviter qu'un persona sans nom de centre
+   *  pousse le LLM à halluciner un nom fictif. */
+  agentName: string;
   model: string;
   voice: string;
   temperature: number;
@@ -133,6 +137,7 @@ const fetchConfig = async (origin: SessionOrigin): Promise<FetchedConfig> => {
     return {
       instructions: data.instructions ?? FALLBACK_INSTRUCTIONS,
       greetingInstructions: data.greetingInstructions ?? FALLBACK_GREETING,
+      agentName: typeof data.agentName === 'string' ? data.agentName : '',
       model: data.model ?? REALTIME_CONFIG.model,
       voice: data.voice ?? REALTIME_CONFIG.voice,
       temperature: data.temperature ?? REALTIME_CONFIG.temperature,
@@ -175,6 +180,7 @@ const DEFAULT_FEATURES: AgentFeatures = {
 const defaultConfig = (): FetchedConfig => ({
   instructions: FALLBACK_INSTRUCTIONS,
   greetingInstructions: FALLBACK_GREETING,
+  agentName: '',
   model: REALTIME_CONFIG.model,
   voice: REALTIME_CONFIG.voice,
   temperature: REALTIME_CONFIG.temperature,
@@ -829,10 +835,20 @@ export default defineAgent<ProcessUserData>({
     // fallback (champ vide en DB) reste une directive ouverte parce qu'il
     // n'y a pas de phrase précise à prononcer.
     const customGreeting = cfg.greetingInstructions?.trim();
+    // Nom de l'agent : champ DB `agent_name` (facultatif) prioritaire ;
+    // sinon "défini dans tes instructions système" (le LLM extrait le nom
+    // de ton persona). On évite ainsi d'imposer un schéma "centre de
+    // beauté" hardcoded qui pousserait le LLM à halluciner un nom de
+    // centre fictif quand le persona n'en a pas (ex. assistant personnel
+    // d'un individu, persona médical, persona service IT, etc.).
+    const namePart =
+      cfg.agentName && cfg.agentName.trim().length > 0
+        ? `« ${cfg.agentName.trim()} »`
+        : "défini dans tes instructions système";
     const greetInstructions =
       customGreeting && customGreeting.length > 0
         ? `Commence ta première réponse en prononçant TEXTUELLEMENT, mot pour mot et dans la même langue, la phrase d'accueil ci-dessous (entre triple guillemets). Ne reformule pas, ne paraphrase pas cette phrase. PUIS, dans la même réponse vocale (même tour, sans attendre que l'interlocuteur parle), enchaîne directement avec la PREMIÈRE étape de ton persona/workflow — par exemple poser la question d'ouverture (« comment puis-je vous aider », « quel est votre nom », etc.) si ton persona l'exige. Reste fluide, comme un humain qui se présente et embraye sur sa première question naturellement.\n\nPhrase d'accueil littérale :\n"""\n${customGreeting}\n"""`
-        : `Salue chaleureusement la cliente en te présentant : utilise ton prénom et le nom du centre tels que définis dans tes instructions système. Enchaîne immédiatement avec la première question/étape de ton persona — ne te contente pas d'un "comment puis-je vous aider", suis ce que ton persona décrit (ex. demander le nom). Si la cliente répond en hébreu, bascule en hébreu pour la suite de l'échange.`;
+        : `Salue chaleureusement l'interlocuteur en te présentant par ton prénom ${namePart}. N'INVENTE PAS de nom de structure, d'entreprise, de centre ou de cabinet : si ton persona en mentionne un (ex. "centre Prestige", "salon X"), reprends EXACTEMENT ce nom ; sinon, présente-toi simplement par ton prénom sans rien y rattacher. Enchaîne immédiatement avec la première étape de ton persona/workflow (cf. tes instructions système) — pas de "comment puis-je vous aider" générique. Respecte le genre de ton persona. Adapte-toi à la langue de l'interlocuteur dès qu'il/elle parle.`;
 
     // Programmatic language enforcement. gpt-realtime-mini has strong
     // language inertia — once warm on FR, it tends to keep replying FR
