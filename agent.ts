@@ -17,14 +17,14 @@ import {
   voice,
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
-// 2026-05-15 : retour à ai-coustics avec **Quail Voice Focus 2.1 L**
-// (modèle 20 MB, window 15ms, latence 30ms, optimisé CPU temps réel).
-// Battu Krisp Telephony sur WER de 81% sur 7 STT en bench interne
+// 2026-05-15 : ai-coustics **Quail Voice Focus 2.1 L** comme NR unique.
+// Modèle 20 MB, window 15ms, latence 30ms, optimisé CPU temps réel.
+// Bench interne : -81% WER vs API Realtime standard sur 7 STT
 // (AssemblyAI/Deepgram/Soniox/Mistral/Cartesia/Gladia/Speechmatics).
 // ⚠️ ai-coustics avait été retiré le 10/05 pour saturation CPU sur
 // l'ancien modèle. QVF 2.1 L est ≈4× plus léger — à monitorer post-deploy
 // via logs "inference is slower than realtime". Si re-sature, fallback :
-// model "quailVfS" (5.3 MB, même fenêtre 15ms) puis Krisp Telephony.
+// model "quailVfS" (5.3 MB, même fenêtre 15ms).
 import { audioEnhancement } from '@livekit/plugins-ai-coustics';
 import { RoomEvent } from '@livekit/rtc-node';
 import { RoomServiceClient } from 'livekit-server-sdk';
@@ -84,6 +84,9 @@ interface FetchedConfig {
   speed: number;
   maxResponseTokens: number;
   features: AgentFeatures;
+  /** Slider 1-10 piloté depuis /dashboard. Mappé vers enhancementLevel
+   *  0.1-1.0 du QVF 2.1 L à la création de la session. */
+  noiseReductionLevel: number;
   // Template injecté en chatCtx au début de chaque appel. Contient des
   // placeholders runtime : {date_fr}, {iso_date}, {time}, {caller_hint_block}.
   // Édité depuis /admin (web). Vide → fallback hardcoded ci-dessous.
@@ -121,6 +124,13 @@ const fetchConfig = async (calledNumber: string): Promise<FetchedConfig> => {
       temperature: data.temperature ?? REALTIME_CONFIG.temperature,
       speed: data.speed ?? REALTIME_CONFIG.speed,
       maxResponseTokens: data.maxResponseTokens ?? 220,
+      // Slider 1-10 ; si /api/agent/config n'a pas encore le champ (DB
+      // pas migrée ou ancien deploy), fallback sur 8 = enhancementLevel
+      // 0.8 (équilibré).
+      noiseReductionLevel:
+        typeof data.noiseReductionLevel === 'number'
+          ? Math.min(10, Math.max(1, Math.round(data.noiseReductionLevel)))
+          : 8,
       // Si le web n'a pas (encore) déployé le champ features, on
       // ouvre tout par défaut (mode legacy = plan premium implicite).
       features: data.features ?? DEFAULT_FEATURES,
@@ -156,6 +166,7 @@ const defaultConfig = (): FetchedConfig => ({
   temperature: REALTIME_CONFIG.temperature,
   speed: REALTIME_CONFIG.speed,
   maxResponseTokens: 220,
+  noiseReductionLevel: 8,
   features: DEFAULT_FEATURES,
 });
 
@@ -956,15 +967,19 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
           // speaker en temps réel. Combine avec OpenAI server-side
           // inputAudioNoiseReduction:near_field (double pass : QVF
           // côté worker, near_field côté Realtime).
-          //   - enhancementLevel 0.8 = équilibré (0.5 conservateur,
-          //     1.0 agressif ; 0.8 recommandé pour téléphonie).
+          //   - enhancementLevel dérivé du slider 1-10 (cf. /dashboard
+          //     "Réduction de bruit") : 1 ≈ 0.1 (quasi-passthrough),
+          //     8 ≈ 0.8 (équilibré, recommandé téléphonie), 10 = 1.0
+          //     (agressif, peut couper la queue de phonèmes).
           //   - VAD inhérent au modèle, tuné pour réponse rapide
           //     (speechHoldDuration 30ms, sensitivity 6.0).
           // Auth : LiveKit Cloud (notre setup) → pas besoin de license_key
           // ai-coustics séparée, c'est le plan-livekit-cloud qui couvre.
           noiseCancellation: audioEnhancement({
             model: 'quailVfL',
-            modelParameters: { enhancementLevel: 0.8 },
+            modelParameters: {
+              enhancementLevel: cfg.noiseReductionLevel / 10,
+            },
             vadSettings: {
               speechHoldDuration: 0.03,
               sensitivity: 6.0,
