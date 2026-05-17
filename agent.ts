@@ -157,7 +157,7 @@ export default defineAgent<ProcessUserData>({
         sess.on('openai_server_event_received', (event: unknown) => {
           const e = event as {
             type?: string;
-            error?: { message?: string; param?: string };
+            error?: { code?: string; message?: string; param?: string };
           };
           const now = Date.now();
           switch (e?.type) {
@@ -192,7 +192,27 @@ export default defineAgent<ProcessUserData>({
               }
               break;
             case 'error': {
+              const errCode = e.error?.code ?? '';
               const errMsg = e.error?.message ?? 'erreur inconnue';
+              // Codes bénins : races entre cancel/response côté SDK et
+              // OpenAI. Le response.cancel envoyé après la fin d'une
+              // response est rejeté mais sans impact runtime. On garde une
+              // trace en `info` pour diag mais on évite de polluer le
+              // niveau error qui doit rester pour les vraies anomalies.
+              const BENIGN_ERROR_CODES = new Set([
+                'response_cancel_not_active',
+              ]);
+              const isBenign = BENIGN_ERROR_CODES.has(errCode);
+              if (isBenign) {
+                void remoteLog(
+                  'agent',
+                  'realtime_server_event_ignored',
+                  `OpenAI bénin (${errCode}) : ${errMsg.slice(0, 200)}`,
+                  'info',
+                  { rawEvent: event },
+                );
+                break;
+              }
               console.warn('[realtime_server_error]', errMsg);
               void remoteLog(
                 'agent',
