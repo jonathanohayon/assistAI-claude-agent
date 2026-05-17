@@ -981,10 +981,13 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
           sessionStart: setupSession,
           total: setupTotal,
         },
-        // Raw arrays for power-user debug
+        // Raw arrays for power-user debug + drill-down chart dans /dashboard.
+        // Chaque array contient 1 valeur par tour de conversation, ordre
+        // chronologique. Permet d'afficher des time-series par-turn.
         rawTtftMs: ttftMsList,
         rawServerEouMs: serverEouDelayMs,
         rawServerTransMs: serverTranscriptionDelayMs,
+        rawServerFirstAudioMs: serverFirstAudioDelayMs,
       });
       await remoteLog(
         'agent',
