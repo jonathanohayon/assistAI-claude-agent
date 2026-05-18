@@ -1009,6 +1009,16 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
         rawServerEouMs: serverEouDelayMs,
         rawServerTransMs: serverTranscriptionDelayMs,
         rawServerFirstAudioMs: serverFirstAudioDelayMs,
+        // Topologie infra — où chaque composant tourne. Snapshot des env
+        // INFRA_* lues au moment de l'appel. Permet d'expliquer une
+        // latence (e.g. worker EU ↔ OpenAI US = ~120ms RTT incompressible).
+        topology: {
+          twilio: process.env['INFRA_TWILIO_EDGE'] ?? 'unknown',
+          worker: process.env['INFRA_WORKER_REGION'] ?? 'unknown',
+          web: process.env['INFRA_WEB_REGION'] ?? 'unknown',
+          livekit: process.env['INFRA_LIVEKIT_REGION'] ?? 'unknown',
+          openai: process.env['INFRA_OPENAI_REGION'] ?? 'unknown',
+        },
       });
       await remoteLog(
         'agent',
