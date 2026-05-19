@@ -87,8 +87,37 @@ export default defineAgent<ProcessUserData>({
     let tConfigFetched = 0;
     let tSessionStarted = 0;
 
+    // Instrumentation détaillée du connect — décompose les phases pour
+    // identifier où passent les 400-600ms du `setupConnect`. Capture les
+    // events Room qui fire pendant ctx.connect() : Connected (= signaling
+    // + ICE + DTLS done), RoomSidChanged (= SFU node assigned us).
+    const connectPhases: Record<string, number> = {};
+    const markConnectPhase = (label: string) => {
+      if (connectPhases[label] === undefined) {
+        connectPhases[label] = Date.now() - phaseT0;
+      }
+    };
+    ctx.room.once(RoomEvent.RoomSidChanged, () => markConnectPhase('roomSidAssigned'));
+    ctx.room.once(RoomEvent.Connected, () => markConnectPhase('connectedEvent'));
+    ctx.room.once(RoomEvent.Reconnecting, () => markConnectPhase('reconnecting'));
     await ctx.connect(undefined, AutoSubscribe.SUBSCRIBE_ALL);
     tConnectDone = Date.now();
+    markConnectPhase('ctxConnectReturned');
+    // Capture room metadata + participant list for diagnostics
+    const roomSid = await ctx.room.getSid().catch(() => null);
+    const roomDiag = {
+      sid: roomSid,
+      name: ctx.room.name,
+      serverUrl: ctx.room.serverUrl ?? null,
+      remoteParticipantCount: ctx.room.remoteParticipants.size,
+    };
+    void remoteLog(
+      'latency',
+      'connect_phases',
+      `Connect breakdown · ${Object.entries(connectPhases).map(([k,v]) => `${k}=${v}ms`).join(' · ')} · room=${roomDiag.name}`,
+      'info',
+      { phases: connectPhases, totalMs: tConnectDone - phaseT0, room: roomDiag },
+    );
 
     // Résout l'origine (SIP Twilio ou Web LiveTest) AVANT le fetch config.
     // Les attributes/metadata arrivent un beat après `connect()` — on
