@@ -1,12 +1,9 @@
-# LiveKit Cloud Agent config — région EU Central (Frankfurt).
-# Utilisé via : lk agent deploy --config livekit.eu-central.toml
-#
-# Le subdomain pointe vers le projet smartaisecure (label "Tamara" depuis
-# 2026-05-19). L'agent.id sera populé automatiquement après le premier
-# `lk agent create` — laisser vide pour la première création.
+# LK Cloud Agent — projet tamarProjectv1, région eu-central (Frankfurt).
+# Confirmé Frankfurt via geo IP des serveurs (161.115.161.0/24 Oracle DE).
+# Workspace créé 2026-05-19 pour migration depuis smartaisecure-l0i0c6i4 (IL).
 
 [project]
-  subdomain = "smartaisecure-l0i0c6i4"
+  subdomain = "tamaraprojectv1-ehlf2zqz"
 
 [agent]
-  id = "CA_SMmtGu7YjFYZ"
+  id = "CA_QazGLQV2Q6zZ"
