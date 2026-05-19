@@ -44,6 +44,7 @@ import {
 import { requireEnv } from './src/env.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { postCallEnd } from './src/post-call.js';
+import { probeRegionsAtStartup } from './src/region-probe.js';
 import { remoteLog } from './src/remote-log.js';
 import type {
   ProcessUserData,
@@ -63,7 +64,15 @@ export default defineAgent<ProcessUserData>({
   // Les events OpenAI input_audio_buffer.speech_started / stopped
   // suffisent pour gérer l'interrupt côté agent SDK.
   prewarm: async () => {
-    // no-op (anciennement chargeait Silero VAD)
+    // Probe région : mesure RTT réels depuis le container LK Cloud Agent
+    // vers Twilio / LK SFU / OpenAI / Web. Loggé dans /dashboard/logs
+    // sous l'event `infra_region_probe` pour corréler env INFRA_* vs réalité.
+    // Best-effort, ne bloque pas le boot si ça foire.
+    try {
+      await probeRegionsAtStartup();
+    } catch (e) {
+      console.warn('[region-probe] failed:', (e as Error).message);
+    }
   },
 
   entry: async (ctx: JobContext<ProcessUserData>) => {
