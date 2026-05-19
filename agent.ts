@@ -45,7 +45,7 @@ import { requireEnv } from './src/env.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { postCallEnd } from './src/post-call.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
-import { remoteLog } from './src/remote-log.js';
+import { enterSession, remoteLog } from './src/remote-log.js';
 import type {
   ProcessUserData,
   TranscriptEntry,
@@ -126,6 +126,12 @@ export default defineAgent<ProcessUserData>({
     // fetchConfig fallback default-tenant.
     const origin = await detectOrigin(ctx, 1_500);
     tSipResolved = Date.now();
+    // Propage origin à tous les remoteLog suivants via AsyncLocalStorage —
+    // permet à lib/logger.ts côté web de résoudre user_id même sur les
+    // events qui ne portent pas de toNumber (config_loaded, auto_hangup,
+    // realtime_server_error, call_ended, etc.) sans avoir à les passer
+    // explicitement à chaque appel.
+    enterSession({ origin });
     const originLabel =
       origin.kind === 'sip'
         ? `SIP ${origin.calledNumber}`
