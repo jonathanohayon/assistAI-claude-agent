@@ -1032,6 +1032,11 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
         // Routing context for filtering in /dashboard/logs
         fromNumber,
         toNumber,
+        // Origin — REQUIS pour que lib/logger.ts web résolve user_id pour les
+        // appels web (qui n'ont ni fromNumber ni toNumber). Sans ça, web
+        // call_metrics arrivent avec events.user_id=NULL → invisibles dans
+        // le graph Monitoring qui filtre par user_id.
+        origin,
         // Setup phase breakdown : où le temps part avant le greeting.
         setupMs: {
           connect: setupConnect,
