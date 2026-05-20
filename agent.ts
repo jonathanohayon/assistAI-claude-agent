@@ -51,6 +51,7 @@ import type {
   TranscriptEntry,
 } from './src/types.js';
 import { makeCalendarTools } from './tools/calendar.js';
+import { makeKnowledgeTools } from './tools/knowledge.js';
 
 export default defineAgent<ProcessUserData>({
   // Silero VAD désactivé : en Realtime mode, OpenAI gère server_vad pour
@@ -862,9 +863,26 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
     // depuis /admin.
     const STATIC_INSTRUCTIONS = cfg.instructions;
 
+    // Tools dynamiques depuis la base de connaissances tenant — chaque
+    // entrée business avec un toolName valide expose un tool LLM
+    // appelable. Le LLM voit `salon_main()`, `spa_telaviv()`, etc.
+    // dans son registry et peut les invoquer pour répondre aux questions
+    // factuelles du client (horaires, services, adresse...).
+    const knowledgeTools = makeKnowledgeTools(cfg.knowledge);
+    const knowledgeNames = Object.keys(knowledgeTools);
+    if (knowledgeNames.length > 0) {
+      void remoteLog(
+        'agent',
+        'knowledge_tools_registered',
+        `Tools knowledge enregistrés : ${knowledgeNames.join(', ')}`,
+        'info',
+        { count: knowledgeNames.length, names: knowledgeNames },
+      );
+    }
+
     const agent = new TenantAgent({
       instructions: STATIC_INSTRUCTIONS,
-      tools: { ...calendarTools, end_call: endCallTool },
+      tools: { ...calendarTools, ...knowledgeTools, end_call: endCallTool },
     });
 
     // Wait until the session actually emits Close (caller hung up OR we

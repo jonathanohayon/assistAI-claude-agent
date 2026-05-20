@@ -69,6 +69,20 @@ export interface FetchedConfig {
    * `{caller_hint_block}`. Édité depuis `/admin`. Vide → fallback ci-bas.
    */
   perCallContextTemplate?: string;
+  /**
+   * Base de connaissances tenant — array de business. Chaque entrée
+   * devient un tool LLM dynamique (key = toolName) qui retourne les
+   * infos à l'agent quand un client pose des questions.
+   */
+  knowledge?: KnowledgeEntry[];
+}
+
+export interface KnowledgeEntry {
+  id: string;
+  toolName: string;
+  businessName: string;
+  openingHours: string;
+  description: string;
 }
 
 /**
