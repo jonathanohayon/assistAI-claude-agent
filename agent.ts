@@ -878,6 +878,47 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
     // depuis /admin.
     const STATIC_INSTRUCTIONS = cfg.instructions;
 
+    // Snapshot du contexte LLM pour audit/debug dans /dashboard/logs.
+    // Cet event matérialise ce qui sera EXACTEMENT envoyé à OpenAI :
+    //   - systemPrompt : `STATIC_INSTRUCTIONS` (= cfg.instructions assemblé
+    //     côté /api/agent/config). Sert de base immutable pour la session.
+    //   - perCallContext : `PER_CALL_CONTEXT` (= template avec placeholders
+    //     substitués : date, heure, caller_hint_block). Injecté au début
+    //     du chatCtx comme system message.
+    //   - greetingInstructions : phrase d'accueil littérale.
+    // Loggé une seule fois par session — taille typique 8-12kB metadata.
+    void remoteLog(
+      'agent',
+      'chatctx_snapshot',
+      `ChatCtx assemblé · system ${STATIC_INSTRUCTIONS.length} chars · per-call ${PER_CALL_CONTEXT.length} chars`,
+      'info',
+      {
+        systemPrompt: STATIC_INSTRUCTIONS,
+        perCallContext: PER_CALL_CONTEXT,
+        greetingInstructions: cfg.greetingInstructions,
+        callerHintBlock,
+        fromNumber: localFromNumber || null,
+        toNumber: toNumber || null,
+        sessionStartedAt: new Date().toISOString(),
+        // Tools registrés visibles par le LLM (built-in + knowledge)
+        toolsRegistered: [
+          ...(cfg.features.calendar !== false
+            ? [
+                'list_available_dates',
+                'check_availability',
+                'book_appointment',
+                'save_contact',
+                'find_appointment',
+                'cancel_appointment',
+                'reschedule_appointment',
+              ]
+            : []),
+          ...Object.keys(makeKnowledgeTools(cfg.knowledge)),
+          'end_call',
+        ],
+      },
+    );
+
     // Tools dynamiques depuis la base de connaissances tenant — chaque
     // entrée business avec un toolName valide expose un tool LLM
     // appelable. Le LLM voit `salon_main()`, `spa_telaviv()`, etc.
