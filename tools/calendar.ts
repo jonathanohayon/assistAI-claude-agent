@@ -148,10 +148,15 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const bookAppointment = llm.tool({
     description:
-      "Réserve un rendez-vous dans Google Calendar. AVANT d'appeler : prénom, téléphone, date, heure, prestation, et déduis le centre depuis la date (LUNDI=Ashdod, MERCREDI=Natanya, autres jours=Jérusalem). L'API rejettera la réservation si le centre ne correspond pas au jour.",
+      "Réserve un rendez-vous dans Google Calendar. AVANT d'appeler : prénom, date, heure, prestation, et déduis le centre depuis la date (LUNDI=Ashdod, MERCREDI=Natanya, autres jours=Jérusalem). Le téléphone est OPTIONNEL — par défaut on prend le numéro de l'appelant (caller ID Twilio). Ne demande JAMAIS le téléphone si tu n'as pas besoin de le récupérer manuellement.",
     parameters: z.object({
       name: z.string().describe("Nom complet du client."),
-      phone: z.string().describe("Numéro de téléphone."),
+      phone: z
+        .string()
+        .nullish()
+        .describe(
+          "Téléphone OPTIONNEL. Laisse vide / null pour utiliser le caller-ID Twilio (recommandé). Ne fournir QUE si la cliente t'a dicté un AUTRE numéro (par ex. tel de sa mère).",
+        ),
       date: z.string().describe("Date au format YYYY-MM-DD."),
       time: z.string().describe("Heure au format HH:MM (24h)."),
       center: CENTER_ENUM.describe(
@@ -166,6 +171,16 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         .describe("Durée en minutes (60 pour soins de la peau, 30 pour épilation, défaut 30)."),
     }),
     execute: async ({ name, phone, date, time, center, description, email, duration }) => {
+      // Fallback caller-ID si le LLM ne fournit pas phone. Évite que
+      // l'agent demande au client un numéro déjà connu via Twilio.
+      const resolvedPhone =
+        (phone && phone.trim().length > 0 ? phone : null) ??
+        ctx.getCallerPhone?.() ??
+        '';
+      if (!resolvedPhone) {
+        return "Erreur : aucun numéro de téléphone fourni et caller-ID indisponible (numéro masqué). Demande à la cliente son numéro pour finaliser la réservation.";
+      }
+      phone = resolvedPhone;
       const data = await post<{
         success?: boolean;
         summary?: string;
@@ -214,17 +229,29 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const saveContact = llm.tool({
     description:
-      "Enregistre un contact dans le CRM (Google Sheet). À utiliser pour conserver les coordonnées d'un appelant.",
+      "Enregistre un contact dans le CRM (Google Sheet). Le téléphone est OPTIONNEL — par défaut on prend le caller-ID Twilio. Ne demande pas le téléphone à la cliente si on l'a déjà via l'appel.",
     parameters: z.object({
       name: z.string().describe("Nom complet."),
-      phone: z.string().describe("Numéro de téléphone."),
+      phone: z
+        .string()
+        .nullish()
+        .describe(
+          "Téléphone OPTIONNEL. Laisse vide pour utiliser le caller-ID Twilio. Ne fournir que si la cliente t'a dicté un autre numéro.",
+        ),
       email: z.string().nullish().describe("Email (optionnel)."),
       notes: z.string().nullish().describe("Notes libres."),
     }),
     execute: async ({ name, phone, email, notes }) => {
+      const resolvedPhone =
+        (phone && phone.trim().length > 0 ? phone : null) ??
+        ctx.getCallerPhone?.() ??
+        '';
+      if (!resolvedPhone) {
+        return "Erreur : aucun numéro fourni et caller-ID indisponible. Demande à la cliente son numéro.";
+      }
       const data = await post<{ success?: boolean; message?: string; error?: string }>(
         '/api/sheets/contact',
-        { name, phone, email: email ?? undefined, notes: notes ?? undefined },
+        { name, phone: resolvedPhone, email: email ?? undefined, notes: notes ?? undefined },
       );
       return data.message ?? data.error ?? 'Contact enregistré.';
     },
