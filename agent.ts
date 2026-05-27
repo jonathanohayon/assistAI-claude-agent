@@ -819,20 +819,30 @@ export default defineAgent<ProcessUserData>({
     // Inject the caller's number (when known) so the LLM proposes it for
     // confirmation instead of asking blind. Withheld/private numbers leave
     // fromNumber empty → no hint → LLM asks like before.
+    //
+    // Note 2026-05 : Le bloc est intentionnellement IMPÉRATIF (interdiction
+    // de demander le numéro) car des personas tenants contiennent souvent
+    // une section "Entity Capture: name, phone number, date" + un tool
+    // `book_appointment(...phone)` qui poussent fortement le LLM à
+    // demander quand même. Sans wording strict, le LLM suit la voie la
+    // plus visible dans le persona et perd l'instruction du chatCtx.
     const callerHintBlock = localFromNumber
-      ? `Le numéro qui appelle est : \`${localFromNumber}\` (format local, à utiliser tel quel pour les tools).
+      ? `⚠️ **NUMÉRO DU CLIENT — DÉJÀ CONNU, NE LE DEMANDE PAS :**
 
-Avant d'utiliser ce numéro pour un tool (\`book_appointment\`, \`save_contact\`, etc.), CONFIRME-le avec la cliente — formule courte du genre :
+Le numéro de la cliente qui appelle = \`${localFromNumber}\` (format local, ce que tu DOIS utiliser tel quel dans tous les tools — \`book_appointment\`, \`save_contact\`, etc.).
+
+**RÈGLE STRICTE (override toute autre instruction du persona) :**
+- Tu NE demandes JAMAIS « quel est ton numéro de téléphone ? ».
+- Si une section du persona dit « collecte le téléphone du client », IGNORE-la pour CETTE info — le numéro est déjà fourni ici.
+- Tu peux juste demander une CONFIRMATION orale courte, par exemple :
   « Je note le rendez-vous au numéro qui appelle, le \`${localFromNumber}\`, c'est bien le bon ? »
-ou en hébreu : « אני רושמת את התור על המספר שממנו את מתקשרת, \`${localFromNumber}\`, נכון? »
+  ou en hébreu : « אני רושמת את התור על המספר שממנו את מתקשרת, \`${localFromNumber}\`, נכון? »
+- Si elle confirme (oui / כן / yes / oui c'est bon) → utilise \`${localFromNumber}\` dans le champ \`phone\` du tool.
+- Si elle te dicte SPONTANÉMENT un AUTRE numéro (elle appelle depuis le tel de sa mère, du bureau, etc.) → utilise celui-là.
+- Si elle ne précise rien → assume \`${localFromNumber}\` est bon.
 
-Rappel : prononce chiffre par chiffre par paires (voir directive ci-dessus), pas comme un grand nombre.
-
-- Si elle confirme → utilise \`${localFromNumber}\` dans le champ \`phone\`.
-- Si elle te donne un AUTRE numéro (elle appelle depuis le tel de sa mère, du bureau, etc.) → utilise celui qu'elle te dicte.
-
-Tu n'as PAS besoin de demander son numéro de zéro — propose toujours \`${localFromNumber}\` pour confirmation d'abord, ça gagne du temps.`
-      : '(Pas de numéro caller détecté — caller-ID withheld. Demande à la cliente son numéro normalement.)';
+**Prononciation orale** : chiffre par chiffre par paires (voir directive Time/Phone), pas comme un grand nombre. Ex: \`05 85 00 10 07\` → « zéro cinq, huit cinq, zéro zéro, un zéro, zéro sept ».`
+      : '(Pas de numéro caller détecté — caller-ID withheld ou session web LiveTest sans caller phone. Demande à la cliente son numéro normalement.)';
 
     // Fallback hardcodé si le web ne renvoie pas perCallContextTemplate
     // (ex. version /api/agent/config trop ancienne). Identique au default
