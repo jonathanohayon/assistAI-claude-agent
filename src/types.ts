@@ -63,6 +63,9 @@ export interface FetchedConfig {
    * 0.1-1.0 du QVF 2.1 L à la création de la session.
    */
   noiseReductionLevel: number;
+  /** Langue d'accueil (he/fr/en). Aussi utilisée comme language hint
+   *  pour le STT input_audio_transcription. */
+  primaryLanguage?: 'he' | 'fr' | 'en' | string;
   /**
    * Template injecté en chatCtx au début de chaque appel. Contient des
    * placeholders runtime : `{date_fr}`, `{iso_date}`, `{time}`,

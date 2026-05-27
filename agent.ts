@@ -293,6 +293,13 @@ export default defineAgent<ProcessUserData>({
       // uniquement par le prompt (cf. INSTRUCTIONS "max 1-2 phrases").
       inputAudioTranscription: {
         model: REALTIME_CONFIG.transcriptionModel,
+        // Language hint pour le STT — sinon le modèle invente chinois/coréen
+        // dès qu'un mot n'est pas reconnu (observé en prod : audio hébreu
+        // mal transcrit en "等一下", "啾啾", "Machalt", etc.). Le primaryLanguage
+        // du tenant guide le STT — 'he', 'fr', 'en'. Le LLM continue à
+        // détecter changes de langue à l'oreille, mais le transcript text
+        // est correctement étiqueté.
+        language: (cfg.primaryLanguage ?? 'fr') as 'he' | 'fr' | 'en',
       },
       // inputAudioNoiseReduction RETIRÉ — ai-coustics Quail Voice
       // Focus 2.1 L (cf. inputOptions.noiseCancellation plus bas) gère
