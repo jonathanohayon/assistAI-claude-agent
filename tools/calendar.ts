@@ -12,8 +12,12 @@ export interface ToolFeatures {
 export interface ToolContext {
   appUrl: string;
   /** E.164 number that was dialed — used by the web service to route to the
-   *  right tenant's Google Calendar/Sheet. */
+   *  right tenant's Google Calendar/Sheet for SIP calls. Empty for web
+   *  LiveTest sessions ; on retombe sur `tenantUserId` pour le routing. */
   dialedPhone: string;
+  /** User UUID du tenant — utilisé pour le routing tenant côté web quand
+   *  `dialedPhone` est vide (cas web LiveTest). Header `x-tenant-user-id`. */
+  tenantUserId: string;
   /** INTERNAL_SECRET shared between agent and web — authorizes per-tenant
    *  routing on /api/calendar/* and /api/sheets/contact. */
   internalSecret: string;
@@ -32,13 +36,17 @@ const makePost =
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
-    // Send tenant-routing headers when both the secret and the dialed number
-    // are available. If either is missing, the web service falls back to its
-    // session-based or demo path and may refuse — which is what we want
-    // rather than silently writing into the admin's calendar.
-    if (ctx.internalSecret && ctx.dialedPhone) {
+    // Toujours envoyer x-internal-secret (authentifie le worker auprès du
+    // web). Pour le tenant routing, prefer x-tenant-phone (SIP) sinon
+    // fallback sur x-tenant-user-id (web LiveTest). Au moins un des deux
+    // doit être présent pour que le web sache quel Google calendar utiliser.
+    if (ctx.internalSecret) {
       headers['x-internal-secret'] = ctx.internalSecret;
-      headers['x-tenant-phone'] = ctx.dialedPhone;
+      if (ctx.dialedPhone) {
+        headers['x-tenant-phone'] = ctx.dialedPhone;
+      } else if (ctx.tenantUserId) {
+        headers['x-tenant-user-id'] = ctx.tenantUserId;
+      }
     }
     const res = await fetch(`${ctx.appUrl}${path}`, {
       method: 'POST',
