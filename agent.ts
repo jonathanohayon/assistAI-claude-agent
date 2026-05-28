@@ -50,6 +50,7 @@ import type {
   ProcessUserData,
   TranscriptEntry,
 } from './src/types.js';
+import { makeBusinessTools } from './tools/business.js';
 import { makeCalendarTools } from './tools/calendar.js';
 import { makeKnowledgeTools } from './tools/knowledge.js';
 
@@ -920,24 +921,38 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
                 'reschedule_appointment',
               ]
             : []),
+          ...Object.keys(makeBusinessTools(cfg.business)),
           ...Object.keys(makeKnowledgeTools(cfg.knowledge)),
           'end_call',
         ],
       },
     );
 
-    // Tools dynamiques depuis la base de connaissances tenant — chaque
-    // entrée business avec un toolName valide expose un tool LLM
-    // appelable. Le LLM voit `salon_main()`, `spa_telaviv()`, etc.
-    // dans son registry et peut les invoquer pour répondre aux questions
-    // factuelles du client (horaires, services, adresse...).
+    // Tools business structurés (list_centres, get_centre_info,
+    // get_opening_hours, list_services, find_service) — depuis la struct
+    // `agent_configs.business` du tenant. 5 tools fixes (un par opération)
+    // au lieu d'un tool par business comme le legacy `knowledge`.
+    const businessTools = makeBusinessTools(cfg.business);
+    const businessNames = Object.keys(businessTools);
+    if (businessNames.length > 0) {
+      void remoteLog(
+        'agent',
+        'business_tools_registered',
+        `Tools business enregistrés : ${businessNames.join(', ')}`,
+        'info',
+        { count: businessNames.length, names: businessNames },
+      );
+    }
+
+    // Tools legacy `knowledge` — gardés en parallèle pour fallback si le
+    // tenant n'a pas encore migré vers business. À droper en release N+1.
     const knowledgeTools = makeKnowledgeTools(cfg.knowledge);
     const knowledgeNames = Object.keys(knowledgeTools);
     if (knowledgeNames.length > 0) {
       void remoteLog(
         'agent',
         'knowledge_tools_registered',
-        `Tools knowledge enregistrés : ${knowledgeNames.join(', ')}`,
+        `Tools knowledge (legacy) enregistrés : ${knowledgeNames.join(', ')}`,
         'info',
         { count: knowledgeNames.length, names: knowledgeNames },
       );
@@ -945,7 +960,12 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
 
     const agent = new TenantAgent({
       instructions: STATIC_INSTRUCTIONS,
-      tools: { ...calendarTools, ...knowledgeTools, end_call: endCallTool },
+      tools: {
+        ...calendarTools,
+        ...businessTools,
+        ...knowledgeTools,
+        end_call: endCallTool,
+      },
     });
 
     // Wait until the session actually emits Close (caller hung up OR we

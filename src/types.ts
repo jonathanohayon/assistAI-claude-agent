@@ -73,11 +73,18 @@ export interface FetchedConfig {
    */
   perCallContextTemplate?: string;
   /**
-   * Base de connaissances tenant — array de business. Chaque entrée
-   * devient un tool LLM dynamique (key = toolName) qui retourne les
-   * infos à l'agent quand un client pose des questions.
+   * Base de connaissances tenant — array de business. Legacy 2026-05-28 :
+   * remplacé par `business` (structure complète). Conservé pour fallback
+   * worker pendant 1 release.
    */
   knowledge?: KnowledgeEntry[];
+  /**
+   * Données business structurées du tenant : identité + centres (avec
+   * horaires hebdo) + soins/tarifs. Exposé via 5 tools fixes côté worker
+   * (list_centres, get_centre_info, get_opening_hours, list_services,
+   * find_service) — voir `tools/business.ts`.
+   */
+  business?: BusinessConfig;
 }
 
 export interface KnowledgeEntry {
@@ -86,6 +93,36 @@ export interface KnowledgeEntry {
   businessName: string;
   openingHours: string;
   description: string;
+}
+
+export type BusinessWeekDay =
+  | 'mon'
+  | 'tue'
+  | 'wed'
+  | 'thu'
+  | 'fri'
+  | 'sat'
+  | 'sun';
+
+export interface BusinessConfig {
+  identity: { name: string; tagline: string; email: string };
+  centres: Array<{
+    id: string;
+    name: string;
+    address: string;
+    hours: Record<
+      BusinessWeekDay,
+      { open: boolean; openTime: string; closeTime: string }
+    >;
+  }>;
+  services: Array<{
+    id: string;
+    name: string;
+    durationMinutes: number;
+    priceILS: number;
+    centreIds: string[] | 'all';
+    description: string;
+  }>;
 }
 
 /**
