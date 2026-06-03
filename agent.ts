@@ -636,13 +636,13 @@ export default defineAgent<ProcessUserData>({
     // ── end_call tool — exposed to the LLM ──────────────────────────────
     const endCallTool = llm.tool({
       description:
-        "Termine l'appel proprement. À appeler UNIQUEMENT APRÈS avoir dit au revoir À VOIX HAUTE EN UNE SEULE PHRASE, quand la conversation est conclue (RDV pris/annulé/déplacé, info donnée et plus rien à demander, ou client a explicitement raccroché verbalement). Ne PAS appeler en plein milieu d'un échange. IMPORTANT : APRÈS l'appel à end_call, NE GÉNÈRE AUCUNE NOUVELLE RÉPONSE VOCALE — la ligne est en train de se fermer, tout son émis sera coupé.",
+        "Termine l'appel et raccroche. À appeler UNIQUEMENT dans le MÊME tour de parole où tu viens de dire au revoir À VOIX HAUTE, EN UNE SEULE PHRASE COURTE et DANS LA LANGUE DU CLIENT — et seulement quand la conversation est réellement finie : RDV pris/annulé/déplacé, info donnée et plus rien à demander, le client dit au revoir ou demande à raccrocher, ou silence persistant après une relance. Ne PAS appeler en plein milieu d'un échange ni pendant une simple pause ; si le client reparle pendant que tu conclus, n'appelle PAS end_call et reprends la conversation. Garde le au revoir COURT : un au revoir long ou bavard augmente le risque que ce raccroché soit perdu et que la ligne reste ouverte. APRÈS end_call, NE GÉNÈRE PLUS AUCUNE PAROLE — la ligne se ferme, tout son émis sera coupé.",
       parameters: z.object({
         reason: z
           .string()
           .nullish()
           .describe(
-            "Raison courte du raccroché : 'rdv_pris', 'rdv_annulé', 'info_donnée', 'client_raccroche', etc.",
+            "Raison courte du raccroché : 'appointment_booked', 'appointment_cancelled', 'appointment_rescheduled', 'information_given', 'client_requested_hangup', 'no_response', 'voicemail'.",
           ),
       }),
       execute: async ({ reason }) => {
