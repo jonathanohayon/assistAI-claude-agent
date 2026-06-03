@@ -44,6 +44,7 @@ import {
 import { requireEnv } from './src/env.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { postCallEnd } from './src/post-call.js';
+import { computeRealtimeCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
 import type {
@@ -523,6 +524,16 @@ export default defineAgent<ProcessUserData>({
     // prompt-cache optimization is working tenant-by-tenant.
     let inputTokensTotal = 0;
     let cachedInputTokens = 0;
+    let outputTokensTotal = 0;
+    // Breakdown audio/texte/cached pour le calcul de coût USD (cf. src/pricing).
+    // L'audio domine le coût ; les tarifs audio/texte/cached diffèrent d'un
+    // ordre de grandeur → on accumule chaque bucket séparément par tour.
+    let inAudioTokens = 0;
+    let inTextTokens = 0;
+    let inCachedAudioTokens = 0;
+    let inCachedTextTokens = 0;
+    let outAudioTokens = 0;
+    let outTextTokens = 0;
     // EOU (end-of-utterance) and transcription latency — useful to split
     // "where did the time go" between VAD/STT/LLM.
     const transcriptionDelayMs: number[] = [];
@@ -541,11 +552,37 @@ export default defineAgent<ProcessUserData>({
         if (Number.isFinite(dur) && dur > 0) responseDurationMs.push(dur);
         const inT = Number(r['inputTokens']);
         if (Number.isFinite(inT)) inputTokensTotal += inT;
+        const outT = Number(r['outputTokens']);
+        if (Number.isFinite(outT)) outputTokensTotal += outT;
         const inputDetails = r['inputTokenDetails'] as
-          | { cachedTokens?: number }
+          | {
+              audioTokens?: number;
+              textTokens?: number;
+              cachedTokens?: number;
+              cachedTokensDetails?: { audioTokens?: number; textTokens?: number };
+            }
           | undefined;
-        if (inputDetails && Number.isFinite(inputDetails.cachedTokens)) {
-          cachedInputTokens += Number(inputDetails.cachedTokens) || 0;
+        if (inputDetails) {
+          const cached = Number(inputDetails.cachedTokens) || 0;
+          if (Number.isFinite(cached)) cachedInputTokens += cached;
+          inAudioTokens += Number(inputDetails.audioTokens) || 0;
+          inTextTokens += Number(inputDetails.textTokens) || 0;
+          const cd = inputDetails.cachedTokensDetails;
+          if (cd) {
+            // Split cached connu → exact.
+            inCachedAudioTokens += Number(cd.audioTokens) || 0;
+            inCachedTextTokens += Number(cd.textTokens) || 0;
+          } else {
+            // Fallback : le cache Realtime porte sur le prompt (texte).
+            inCachedTextTokens += cached;
+          }
+        }
+        const outputDetails = r['outputTokenDetails'] as
+          | { audioTokens?: number; textTokens?: number }
+          | undefined;
+        if (outputDetails) {
+          outAudioTokens += Number(outputDetails.audioTokens) || 0;
+          outTextTokens += Number(outputDetails.textTokens) || 0;
         }
       } else if (t === 'eou_metrics') {
         const td = Number(r['transcriptionDelayMs']);
@@ -1092,6 +1129,19 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
       const cacheHitRatio = inputTokensTotal > 0
         ? Math.round((cachedInputTokens / inputTokensTotal) * 100)
         : null;
+      // Coût USD de l'appel à partir du breakdown tokens (cf. src/pricing).
+      const totalTokens = inputTokensTotal + outputTokensTotal;
+      const costUsd = computeRealtimeCostUsd(
+        {
+          inAudio: inAudioTokens,
+          inText: inTextTokens,
+          inCachedAudio: inCachedAudioTokens,
+          inCachedText: inCachedTextTokens,
+          outAudio: outAudioTokens,
+          outText: outTextTokens,
+        },
+        cfg.model,
+      );
       const fmt = (ms: number | null) =>
         ms == null ? '?' : `${(ms / 1000).toFixed(2)}s`;
       const fmtMs = (ms: number | null) => (ms == null ? '?' : `${ms}ms`);
@@ -1117,6 +1167,7 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
         `Greeting: ${fmt(greetingMs)} · ` +
         `Setup: ${fmtMs(setupTotal)} (connect ${fmtMs(setupConnect)} · sip ${fmtMs(setupSip)} · cfg ${fmtMs(setupConfig)} · sess ${fmtMs(setupSession)}) · ` +
         `Cache: ${cacheHitRatio == null ? 'n/a' : cacheHitRatio + '%'} hit · ` +
+        `Tokens: ${totalTokens.toLocaleString('en-US')} (~$${costUsd.toFixed(4)}) · ` +
         `Trans: ${fmtMs(transMean)} · EOU: ${fmtMs(eouMean)} · ` +
         `FirstAudio: ${fmtMs(serverFirstAudio.mean)}`;
 
@@ -1139,6 +1190,16 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
           inputTokensTotal,
           cachedInputTokens,
           cacheHitRatio,
+        },
+        // Consommation + coût de l'appel (affiché dans /dashboard/logs).
+        // Coût figé au tarif du moment de l'appel → historiquement exact.
+        usage: {
+          model: cfg.model,
+          inputTokens: inputTokensTotal,
+          outputTokens: outputTokensTotal,
+          totalTokens,
+          cachedInputTokens,
+          costUsd,
         },
         // Routing context for filtering in /dashboard/logs
         fromNumber,
