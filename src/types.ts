@@ -123,6 +123,9 @@ export interface BusinessConfig {
     centreIds: string[] | 'all';
     description: string;
   }>;
+  /** Texte libre optionnel — règles strictes centres/jours injectées dans
+   *  le system prompt sous "Centers and Days Rules (STRICT)". */
+  centresRules?: string;
 }
 
 /**

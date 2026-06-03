@@ -42,6 +42,7 @@ export interface BusinessConfig {
   identity: { name: string; tagline: string; email: string };
   centres: BusinessCentre[];
   services: BusinessService[];
+  centresRules?: string;
 }
 
 const DAY_LABELS_FR: Record<WeekDay, string> = {
