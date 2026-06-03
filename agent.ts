@@ -1055,44 +1055,14 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
         },
       });
 
-      // ── session.update à chaud — tentative temperature ─────────────────
-      // Le constructor RealtimeModel ne supporte pas (officiellement)
-      // temperature dans l'API GA. Mais le `session.update` event accepte
-      // un payload partiel — on tente d'envoyer cfg.temperature directement.
-      // Si OpenAI rejette, on verra un event `error` côté serveur (déjà
-      // loggé via le LoggingRealtimeModel ci-dessus). Si accepté, on aura
-      // un event `session.updated` confirmant. Dans les 2 cas la session
-      // continue (l'erreur ne kill pas la connexion).
-      //
-      // capturedRtSession est set par LoggingRealtimeModel.session() qui
-      // est appelé pendant session.start() — donc dispo à ce stade.
-      // Cast explicite : TS perd le type quand on assigne capturedRtSession
-      // depuis un closure (override method called externally), le narrowing
-      // `if (capturedRtSession)` n'est pas suffisant. On force le type.
-      const rtSess = capturedRtSession as openai.realtime.RealtimeSession | null;
-      if (rtSess) {
-        try {
-          rtSess.sendEvent({
-            type: 'session.update',
-            // session.type "realtime" est REQUIRED par l'API GA d'OpenAI
-            // depuis ~2025 (typing SDK l'a en optional mais le runtime
-            // renvoie "Missing required parameter: 'session.type'." si
-            // omis — cf. logs Railway 2026-05-15).
-            session: { type: 'realtime', temperature: cfg.temperature },
-          });
-          console.log(
-            `[session.update] temperature attempt: ${cfg.temperature}`,
-          );
-        } catch (e) {
-          console.warn(
-            `[session.update] temperature failed (sync error): ${(e as Error).message}`,
-          );
-        }
-      } else {
-        console.warn(
-          '[session.update] capturedRtSession null — temperature non envoyée',
-        );
-      }
+      // NB : on n'envoie PLUS de session.update temperature ici. OpenAI
+      // Realtime GA a retiré le param (`Unknown parameter: 'session.temperature'`)
+      // → l'event était rejeté à CHAQUE appel (bruit de logs) ET partait pile
+      // au moment où l'accueil se génère : un session.update concurrent à la
+      // réponse en cours peut retarder le 1er audio (greetingMs). On le retire.
+      // `capturedRtSession` reste capturé (LoggingRealtimeModel) pour un usage
+      // futur éventuel de ClientEvents custom.
+      void capturedRtSession;
 
       // Mark the moment the session is ready — anything after this until the
       // first 'speaking' transition is the greeting latency.
