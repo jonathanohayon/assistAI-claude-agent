@@ -42,6 +42,7 @@ import {
   SILENCE_HANGUP_MS,
 } from './src/constants.js';
 import { requireEnv } from './src/env.js';
+import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { postCallEnd } from './src/post-call.js';
 import { computeRealtimeCostUsd } from './src/pricing.js';
@@ -158,6 +159,20 @@ export default defineAgent<ProcessUserData>({
       'info',
       { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
     );
+
+    // Accueil instantané : on lance le fetch de l'opener pré-généré DÈS
+    // maintenant (en parallèle du reste du setup) pour qu'il soit prêt à
+    // l'entrée de l'agent. SIP uniquement (l'endpoint route par numéro).
+    // null si indispo → onEnter retombe sur l'accueil modèle.
+    const dialedNumber =
+      origin.kind === 'sip' ? origin.calledNumber : '';
+    const openerPromise = dialedNumber
+      ? fetchOpenerPcm(
+          dialedNumber,
+          process.env['INTERNAL_SECRET'] ?? '',
+          process.env['APP_URL'] ?? '',
+        ).catch(() => null)
+      : Promise.resolve(null);
 
     // ── OpenAI Realtime server-event timings ─────────────────────────────
     // En mode Realtime, le SDK LiveKit n'expose pas transcriptionDelay /
@@ -512,6 +527,9 @@ export default defineAgent<ProcessUserData>({
     //     cancelled responses, etc.) — sert aussi de cross-check.
     let sessionStartedAtMs: number | null = null;
     let greetingMs: number | null = null;
+    // 'prerendered' = accueil joué via session.say (audio pré-généré), 'model'
+    // = accueil généré par le LLM (fallback). Loggé dans call_metrics.
+    let greetingSource: 'prerendered' | 'model' = 'model';
     let lastUserDoneAtMs: number | null = null;
     const wallclockTurnLatenciesMs: number[] = [];
 
@@ -735,20 +753,46 @@ export default defineAgent<ProcessUserData>({
       private lastUserLang: 'he' | 'lat' | null = null;
 
       override async onEnter(): Promise<void> {
-        // PER_CALL_CONTEXT (date du jour, numéro appelant) est maintenant
-        // injecté dans le chatCtx INITIAL passé au constructeur de l'agent
-        // (cf. `new TenantAgent({ chatCtx })` plus bas), donc envoyé pendant
-        // session.start() — AVANT la mesure de greetingMs. Avant, on faisait
-        // un `await updateChatCtx()` ici = un aller-retour OpenAI EN SÉRIE
-        // juste avant generateReply, qui gonflait inutilement la latence
-        // d'accueil (E2E init). Le prompt cache reste intact : c'est un
-        // conversation item, pas le prefix `instructions` (toujours identique).
-        // generateReply part donc immédiatement à l'entrée.
-        // Si greetInstructions est vide (= ni tenant greeting_instructions ni
-        // admin greeting_fallback_template renseignés), on appelle quand même
-        // generateReply pour déclencher la première réponse, MAIS sans
-        // override d'instructions. Le LLM ouvre selon son persona system
-        // prompt seul — exactement ce que le tenant a configuré.
+        // ── Accueil INSTANTANÉ pré-généré ──────────────────────────────────
+        // Si un opener audio est dispo (voix exacte, généré côté web), on le
+        // joue via session.say au lieu de laisser le modèle générer l'accueil
+        // (~2s de prefill/TTFA). On gèle l'entrée pendant la lecture (pas de
+        // faux turn / echo), et addToChatCtx ajoute le texte de l'opener au
+        // chatCtx → le modèle SAIT qu'il a accueilli et ne resalue pas ; il
+        // reste silencieux jusqu'au 1er tour client.
+        const opener = await openerPromise;
+        if (opener) {
+          try {
+            this.session.input.setAudioEnabled(false);
+            const handle = this.session.say(opener.text, {
+              audio: pcmToFrameStream(opener.pcm, opener.sampleRate),
+              addToChatCtx: true,
+            });
+            // Garde-fou : ne jamais bloquer l'appel si waitForPlayout hangait.
+            await Promise.race([
+              handle.waitForPlayout(),
+              new Promise((r) => setTimeout(r, 15000)),
+            ]);
+            greetingSource = 'prerendered';
+            return;
+          } catch (e) {
+            void remoteLog(
+              'agent',
+              'greeting_prerender_failed',
+              `Lecture opener pré-généré échouée : ${(e as Error)?.message ?? e}`,
+              'warn',
+              {},
+            );
+            // → on retombe sur l'accueil modèle ci-dessous.
+          } finally {
+            this.session.input.setAudioEnabled(true);
+          }
+        }
+
+        // ── Fallback : accueil par le modèle (comportement historique) ─────
+        // PER_CALL_CONTEXT est injecté dans le chatCtx INITIAL (constructeur),
+        // donc envoyé pendant session.start(). Si greetInstructions est vide,
+        // generateReply sans override → le LLM ouvre selon son persona.
         if (greetInstructions.length > 0) {
           await this.session.generateReply({
             instructions: greetInstructions,
@@ -1155,6 +1199,7 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
         ttfaMs: ttfa,
         responseDurationMs: dur,
         greetingMs,
+        greetingSource,
         // Breakdown KPIs — server-event measurements (Realtime mode)
         serverTranscriptionDelayMs: serverTrans,
         serverEouDelayMs: serverEou,
