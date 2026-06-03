@@ -735,16 +735,15 @@ export default defineAgent<ProcessUserData>({
       private lastUserLang: 'he' | 'lat' | null = null;
 
       override async onEnter(): Promise<void> {
-        // Inject the per-call dynamic context (today's date, caller phone)
-        // as a system message at the START of chatCtx — visible to the
-        // model for ALL subsequent turns, but OUTSIDE the cached prefix
-        // (this.instructions stays 100% identical across calls for the
-        // same tenant). Maximizes prompt cache hit rate.
-        if (PER_CALL_CONTEXT.trim()) {
-          const ctx = this.chatCtx.copy();
-          ctx.addMessage({ role: 'system', content: PER_CALL_CONTEXT });
-          await this.updateChatCtx(ctx);
-        }
+        // PER_CALL_CONTEXT (date du jour, numéro appelant) est maintenant
+        // injecté dans le chatCtx INITIAL passé au constructeur de l'agent
+        // (cf. `new TenantAgent({ chatCtx })` plus bas), donc envoyé pendant
+        // session.start() — AVANT la mesure de greetingMs. Avant, on faisait
+        // un `await updateChatCtx()` ici = un aller-retour OpenAI EN SÉRIE
+        // juste avant generateReply, qui gonflait inutilement la latence
+        // d'accueil (E2E init). Le prompt cache reste intact : c'est un
+        // conversation item, pas le prefix `instructions` (toujours identique).
+        // generateReply part donc immédiatement à l'entrée.
         // Si greetInstructions est vide (= ni tenant greeting_instructions ni
         // admin greeting_fallback_template renseignés), on appelle quand même
         // generateReply pour déclencher la première réponse, MAIS sans
@@ -999,8 +998,18 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
       );
     }
 
+    // chatCtx initial : on y place le PER_CALL_CONTEXT (system message) pour
+    // qu'il soit synchronisé pendant session.start() au lieu d'un round-trip
+    // séparé en onEnter (gain sur greetingMs / E2E init). `instructions` reste
+    // STATIC_INSTRUCTIONS → prefix caché identique d'un appel à l'autre.
+    const initialChatCtx = llm.ChatContext.empty();
+    if (PER_CALL_CONTEXT.trim()) {
+      initialChatCtx.addMessage({ role: 'system', content: PER_CALL_CONTEXT });
+    }
+
     const agent = new TenantAgent({
       instructions: STATIC_INSTRUCTIONS,
+      chatCtx: initialChatCtx,
       tools: {
         ...calendarTools,
         ...businessTools,
