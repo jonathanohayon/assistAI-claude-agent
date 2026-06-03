@@ -13,7 +13,7 @@
 import type { JobContext } from '@livekit/agents';
 
 import { ORIGIN_DETECTION_TIMEOUT_MS } from './constants.js';
-import type { ProcessUserData, SessionOrigin } from './types.js';
+import type { CallChannel, ProcessUserData, SessionOrigin } from './types.js';
 
 /**
  * Numéro de l'appelant (From) depuis un participant SIP Twilio.
@@ -37,9 +37,28 @@ export function sipFromOf(p: {
 /**
  * Numéro composé (To) depuis un participant SIP Twilio.
  * Sert à résoudre le tenant via `/api/agent/config?phone=...`.
+ *
+ * Les appels WhatsApp empruntent le MÊME chemin SIP que les appels PSTN,
+ * mais le numéro composé est préfixé `whatsapp:` (ex: `whatsapp:+972237647000`).
+ * On détecte ce préfixe pour poser le `channel` et on retourne :
+ *   - `raw`          : la valeur brute de l'attribute (préfixe inclus)
+ *   - `channel`      : `'whatsapp'` si préfixé, sinon `'pstn'`
+ *   - `calledNumber` : le numéro NU (préfixe `whatsapp:` retiré) — c'est lui
+ *                      qu'on envoie à `/api/agent/config?phone=...`.
+ *
+ * Si l'attribute est absent → `{ raw:'', channel:'pstn', calledNumber:'' }`.
  */
-export function sipToOf(p: { attributes: Record<string, string> }): string {
-  return p.attributes['sip.trunkPhoneNumber'] ?? '';
+export function sipToOf(p: { attributes: Record<string, string> }): {
+  raw: string;
+  channel: CallChannel;
+  calledNumber: string;
+} {
+  const raw = p.attributes['sip.trunkPhoneNumber'] ?? '';
+  const WA_PREFIX = 'whatsapp:';
+  if (raw.startsWith(WA_PREFIX)) {
+    return { raw, channel: 'whatsapp', calledNumber: raw.slice(WA_PREFIX.length) };
+  }
+  return { raw, channel: 'pstn', calledNumber: raw };
 }
 
 /**
@@ -85,9 +104,10 @@ export async function detectOrigin(
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     for (const [, p] of ctx.room.remoteParticipants) {
-      // 1. SIP attributes (Twilio)
-      const calledNumber = sipToOf(p);
-      if (calledNumber) return { kind: 'sip', calledNumber };
+      // 1. SIP attributes (Twilio) — PSTN ou WhatsApp (préfixe `whatsapp:`)
+      const sip = sipToOf(p);
+      if (sip.raw)
+        return { kind: 'sip', calledNumber: sip.calledNumber, channel: sip.channel };
       // 2. Web metadata (Phase 2 LiveTest)
       const userId = webUserIdOf(p);
       if (userId) return { kind: 'web', userId };

@@ -14,7 +14,7 @@
  */
 
 import { POST_CALL_TIMEOUT_MS } from './constants.js';
-import type { TranscriptEntry } from './types.js';
+import type { CallChannel, TranscriptEntry } from './types.js';
 
 /**
  * POST le transcript + métadonnées à `/api/calls/end`.
@@ -26,12 +26,17 @@ import type { TranscriptEntry } from './types.js';
  *                   (Phase 2) sinon `/api/calls/end` fallback sur
  *                   `resolveDefaultTenant` et leak cross-tenant (le call
  *                   de jonathanohayon1 atterrit chez patriciaelfassy1).
+ * @param channel    Canal de l'appel SIP ('pstn' | 'whatsapp'). Pour les
+ *                   appels WhatsApp, `/api/calls/end` envoie le recap client
+ *                   en free-form dans le thread ouvert (fenêtre 24h) au lieu
+ *                   d'un template froid. Omis pour les sessions web.
  */
 export async function postCallEnd(
   transcript: TranscriptEntry[],
   fromNumber: string,
   toNumber: string,
   userId?: string,
+  channel?: CallChannel,
 ): Promise<void> {
   const appUrl = process.env['APP_URL'];
   const secret = process.env['INTERNAL_SECRET'];
@@ -60,6 +65,8 @@ export async function postCallEnd(
         // Omettre `userId` si undefined plutôt qu'envoyer null —
         // /api/calls/end fait son routing tenant en cascade.
         ...(userId ? { userId } : {}),
+        // Canal SIP : conditionne le mode d'envoi du recap client côté web.
+        ...(channel ? { channel } : {}),
       }),
       signal: AbortSignal.timeout(POST_CALL_TIMEOUT_MS),
     });

@@ -142,11 +142,16 @@ export interface TranscriptEntry {
  * `detectOrigin()`. Conditionne la résolution du tenant côté
  * /api/agent/config (?phone vs ?userId vs default).
  *
- *   - `sip`     : appel Twilio entrant, on lit `sip.trunkPhoneNumber`
+ *   - `sip`     : appel Twilio entrant, on lit `sip.trunkPhoneNumber`.
+ *                 `channel` distingue PSTN (Twilio classique) et WhatsApp
+ *                 (même chemin SIP, mais numéro composé préfixé `whatsapp:`).
+ *                 `calledNumber` est toujours le numéro nu (préfixe retiré).
  *   - `web`     : LiveTest depuis le navigateur (Phase 2), userId via metadata
  *   - `unknown` : ni l'un ni l'autre — fallback default tenant
  */
+export type CallChannel = 'pstn' | 'whatsapp';
+
 export type SessionOrigin =
-  | { kind: 'sip'; calledNumber: string }
+  | { kind: 'sip'; calledNumber: string; channel: CallChannel }
   | { kind: 'web'; userId: string }
   | { kind: 'unknown' };

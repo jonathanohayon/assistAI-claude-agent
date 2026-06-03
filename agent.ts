@@ -136,7 +136,7 @@ export default defineAgent<ProcessUserData>({
     enterSession({ origin });
     const originLabel =
       origin.kind === 'sip'
-        ? `SIP ${origin.calledNumber}`
+        ? `${origin.channel === 'whatsapp' ? 'WA' : 'SIP'} ${origin.calledNumber}`
         : origin.kind === 'web'
           ? `Web user ${origin.userId}`
           : '(origine inconnue)';
@@ -342,7 +342,10 @@ export default defineAgent<ProcessUserData>({
       const f = sipFromOf(p);
       const t = sipToOf(p);
       if (f) fromNumber = f;
-      if (t) toNumber = t;
+      // t.calledNumber = numéro nu (préfixe `whatsapp:` retiré) — cohérent
+      // avec l'init depuis origin.calledNumber et avec ce qu'on POST à
+      // /api/calls/end (jamais le préfixe whatsapp:).
+      if (t.raw) toNumber = t.calledNumber;
     };
     for (const [, p] of ctx.room.remoteParticipants) captureNumbers(p);
     ctx.room.on(RoomEvent.ParticipantConnected, (p) => captureNumbers(p));
@@ -444,6 +447,7 @@ export default defineAgent<ProcessUserData>({
         fromNumber,
         toNumber,
         origin.kind === 'web' ? origin.userId : undefined,
+        origin.kind === 'sip' ? origin.channel : undefined,
       );
     };
 
@@ -1168,6 +1172,10 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
           web: process.env['INFRA_WEB_REGION'] ?? 'unknown',
           livekit: process.env['INFRA_LIVEKIT_REGION'] ?? 'unknown',
           openai: process.env['INFRA_OPENAI_REGION'] ?? 'unknown',
+          // Canal d'arrivée de l'appel (PSTN vs WhatsApp) — undefined pour
+          // les origines non-sip (web / unknown). Permet au monitoring de
+          // drill-down par channel.
+          channel: origin.kind === 'sip' ? origin.channel : undefined,
         },
       });
       await remoteLog(
