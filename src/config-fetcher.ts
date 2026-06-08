@@ -81,15 +81,26 @@ export async function fetchConfig(
     return defaultConfig();
   }
 
+  // Appel sortant de campagne : endpoint dédié (instructions bâties depuis
+  // l'objectif/persona + variables du contact), gardé par x-internal-secret.
+  const headers: Record<string, string> = {};
+  if (origin.kind === 'campaign') {
+    const secret = process.env['INTERNAL_SECRET'];
+    if (secret) headers['x-internal-secret'] = secret;
+  }
+
   try {
     const url =
       origin.kind === 'sip'
         ? `${appUrl}/api/agent/config?phone=${encodeURIComponent(origin.calledNumber)}`
         : origin.kind === 'web'
           ? `${appUrl}/api/agent/config?userId=${encodeURIComponent(origin.userId)}`
-          : `${appUrl}/api/agent/config`;
+          : origin.kind === 'campaign'
+            ? `${appUrl}/api/agent/campaign-config?campaignId=${encodeURIComponent(origin.campaignId)}&contactId=${encodeURIComponent(origin.contactId)}`
+            : `${appUrl}/api/agent/config`;
 
     const res = await fetch(url, {
+      headers,
       signal: AbortSignal.timeout(CONFIG_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {

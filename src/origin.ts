@@ -97,10 +97,46 @@ export function webUserIdOf(p: { metadata?: string }): string | null {
  * un appel — au-delà on retourne `unknown` et le worker fallback sur
  * default tenant.
  */
+// Appel sortant de campagne : la metadata de dispatch (ctx.job.metadata)
+// porte source=campaign + les ids. Disponible immédiatement (pas besoin
+// d'attendre les attributs SIP) → on court-circuite la détection.
+function campaignOriginOf(ctx: JobContext<ProcessUserData>): SessionOrigin | null {
+  try {
+    const raw = (ctx.job?.metadata ?? '').trim();
+    if (!raw) return null;
+    const meta = JSON.parse(raw) as {
+      source?: string;
+      campaignId?: string;
+      contactId?: string;
+      userId?: string;
+    };
+    if (
+      meta.source === 'campaign' &&
+      meta.campaignId &&
+      meta.contactId &&
+      meta.userId
+    ) {
+      return {
+        kind: 'campaign',
+        campaignId: meta.campaignId,
+        contactId: meta.contactId,
+        userId: meta.userId,
+      };
+    }
+  } catch {
+    /* metadata non-JSON ou absente → ce n'est pas une campagne */
+  }
+  return null;
+}
+
 export async function detectOrigin(
   ctx: JobContext<ProcessUserData>,
   timeoutMs: number = ORIGIN_DETECTION_TIMEOUT_MS,
 ): Promise<SessionOrigin> {
+  // Campagne sortante : prioritaire, dispo dès le dispatch.
+  const campaign = campaignOriginOf(ctx);
+  if (campaign) return campaign;
+
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     for (const [, p] of ctx.room.remoteParticipants) {
