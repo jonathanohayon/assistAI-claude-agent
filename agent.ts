@@ -44,7 +44,7 @@ import {
 import { requireEnv } from './src/env.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
-import { postCallEnd } from './src/post-call.js';
+import { postCallEnd, postCampaignResult } from './src/post-call.js';
 import { computeRealtimeCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
@@ -458,6 +458,17 @@ export default defineAgent<ProcessUserData>({
     const triggerRecap = async () => {
       if (recapSent) return;
       recapSent = true;
+      // Appel sortant de campagne → résultat vers /api/agent/campaign-result
+      // (analyse IA + transition contact côté web), pas le pipeline inbound.
+      if (origin.kind === 'campaign') {
+        await postCampaignResult(
+          origin.campaignId,
+          origin.contactId,
+          transcript,
+          Math.round((Date.now() - sessionStartedAt) / 1000),
+        );
+        return;
+      }
       await postCallEnd(
         transcript,
         fromNumber,

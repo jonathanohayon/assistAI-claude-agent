@@ -154,4 +154,9 @@ export type CallChannel = 'pstn' | 'whatsapp';
 export type SessionOrigin =
   | { kind: 'sip'; calledNumber: string; channel: CallChannel }
   | { kind: 'web'; userId: string }
+  // Appel SORTANT de campagne — la metadata de dispatch porte
+  // { source:'campaign', campaignId, contactId, userId }. La config runtime
+  // vient de /api/agent/campaign-config et le recap part vers
+  // /api/agent/campaign-result.
+  | { kind: 'campaign'; campaignId: string; contactId: string; userId: string }
   | { kind: 'unknown' };
