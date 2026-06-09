@@ -97,13 +97,16 @@ export function webUserIdOf(p: { metadata?: string }): string | null {
  * un appel — au-delà on retourne `unknown` et le worker fallback sur
  * default tenant.
  */
-// Appel sortant de campagne : la metadata de dispatch (ctx.job.metadata)
-// porte source=campaign + les ids. Disponible immédiatement (pas besoin
-// d'attendre les attributs SIP) → on court-circuite la détection.
-function campaignOriginOf(ctx: JobContext<ProcessUserData>): SessionOrigin | null {
+// Parse un blob JSON de metadata et renvoie une origine campagne si
+// `source=campaign` + ids présents. Utilisé pour DEUX sources :
+//   1. ctx.job.metadata  (dispatch agent explicite via createDispatch)
+//   2. participant.metadata du callee SIP (posé par dial.ts côté web)
+// La 2ᵉ est cruciale : si l'agent est amené par une règle SIP auto (sans
+// metadata de job), il verrait sinon l'appel comme un ENTRANT et chargerait
+// la persona réceptionniste ("que puis-je faire pour vous").
+function parseCampaignMeta(raw?: string | null): SessionOrigin | null {
+  if (!raw) return null;
   try {
-    const raw = (ctx.job?.metadata ?? '').trim();
-    if (!raw) return null;
     const meta = JSON.parse(raw) as {
       source?: string;
       campaignId?: string;
@@ -124,9 +127,15 @@ function campaignOriginOf(ctx: JobContext<ProcessUserData>): SessionOrigin | nul
       };
     }
   } catch {
-    /* metadata non-JSON ou absente → ce n'est pas une campagne */
+    /* metadata non-JSON ou absente → pas une campagne */
   }
   return null;
+}
+
+// Appel sortant de campagne via la metadata du dispatch agent (ctx.job).
+// Disponible immédiatement → court-circuite la détection.
+function campaignOriginOf(ctx: JobContext<ProcessUserData>): SessionOrigin | null {
+  return parseCampaignMeta(ctx.job?.metadata ?? null);
 }
 
 export async function detectOrigin(
@@ -140,6 +149,11 @@ export async function detectOrigin(
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     for (const [, p] of ctx.room.remoteParticipants) {
+      // 0. Campagne sortante : metadata posée sur le callee SIP par dial.ts.
+      //    PRIORITAIRE sur le check SIP — sinon un appel sortant serait pris
+      //    pour un entrant (persona réceptionniste).
+      const camp = parseCampaignMeta(p.metadata);
+      if (camp) return camp;
       // 1. SIP attributes (Twilio) — PSTN ou WhatsApp (préfixe `whatsapp:`)
       const sip = sipToOf(p);
       if (sip.raw)
