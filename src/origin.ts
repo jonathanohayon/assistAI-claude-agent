@@ -138,12 +138,29 @@ function campaignOriginOf(ctx: JobContext<ProcessUserData>): SessionOrigin | nul
   return parseCampaignMeta(ctx.job?.metadata ?? null);
 }
 
+// Le nom de room encode la campagne (posé par dispatch.ts côté web) :
+//   campaign__<campaignId>__<contactId>__<attempts>
+// Signal le PLUS fiable : dispo dès l'entrée, sans dépendre de la metadata
+// SIP/job (qui peut manquer si l'agent est amené par une règle de dispatch).
+// userId vide ici (config-fetcher + post-call routent par campaignId/contactId).
+function campaignFromRoomName(name: string | undefined): SessionOrigin | null {
+  if (!name || !name.startsWith('campaign__')) return null;
+  const parts = name.split('__'); // ['campaign', campaignId, contactId, attempts]
+  const campaignId = parts[1];
+  const contactId = parts[2];
+  if (campaignId && contactId) {
+    return { kind: 'campaign', campaignId, contactId, userId: '' };
+  }
+  return null;
+}
+
 export async function detectOrigin(
   ctx: JobContext<ProcessUserData>,
   timeoutMs: number = ORIGIN_DETECTION_TIMEOUT_MS,
 ): Promise<SessionOrigin> {
-  // Campagne sortante : prioritaire, dispo dès le dispatch.
-  const campaign = campaignOriginOf(ctx);
+  // Campagne sortante : (1) metadata du job si présente, sinon (2) nom de room
+  // — le plus robuste, dispo immédiatement.
+  const campaign = campaignOriginOf(ctx) ?? campaignFromRoomName(ctx.room?.name);
   if (campaign) return campaign;
 
   const start = Date.now();
