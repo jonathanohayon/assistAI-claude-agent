@@ -486,6 +486,10 @@ export default defineAgent<ProcessUserData>({
     const sessionStartedAt = Date.now();
     let lastActivity = sessionStartedAt;
     let closing = false;
+    // État courant de l'agent. Tant que l'agent parle/réfléchit (≠ 'listening'),
+    // on ne compte PAS de silence — sinon un long monologue (ex. argumentaire de
+    // vente > SILENCE_HANGUP_MS) déclenchait un auto_hangup en plein milieu.
+    let agentState = 'initializing';
     const resetActivity = () => {
       lastActivity = Date.now();
     };
@@ -634,6 +638,7 @@ export default defineAgent<ProcessUserData>({
     });
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
       const next = (ev as { newState?: string }).newState;
+      if (next) agentState = next;
       // 'listening' is the idle state where we WANT to count silence — only
       // reset on 'speaking' / 'thinking' / 'initializing' which represent
       // active processing.
@@ -656,6 +661,12 @@ export default defineAgent<ProcessUserData>({
       // Grace period at the start: don't hang up just because the customer
       // takes a beat to respond to the greeting.
       if (Date.now() - sessionStartedAt < SILENCE_GRACE_START_MS) return;
+      // L'agent parle ou réfléchit (ex. long argumentaire) → ce n'est pas du
+      // silence. On garde la ligne vivante et on remet le compteur à zéro.
+      if (agentState !== 'listening') {
+        resetActivity();
+        return;
+      }
       if (Date.now() - lastActivity > SILENCE_HANGUP_MS) {
         clearInterval(silenceWatcher);
         void closeSession(`silence_${SILENCE_HANGUP_MS}ms`);
