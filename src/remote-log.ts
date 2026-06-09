@@ -23,11 +23,12 @@ type LogLevel = 'info' | 'warn' | 'error';
 
 interface SessionContext {
   origin?: {
-    kind?: 'sip' | 'web' | 'campaign' | 'unknown';
+    kind?: 'sip' | 'web' | 'campaign' | 'outbound_test' | 'unknown';
     userId?: string;
     calledNumber?: string;
     campaignId?: string;
     contactId?: string;
+    agentId?: string;
   };
 }
 
