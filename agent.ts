@@ -696,6 +696,15 @@ export default defineAgent<ProcessUserData>({
         const finish = (cause: string) => {
           if (closed) return;
           closed = true;
+          // Le résultat du tool est réinjecté au LLM, qui génère une réponse
+          // de suivi → l'agent redit "au revoir" une fois de trop avant la
+          // fermeture. Une fois l'au revoir réellement prononcé, on coupe
+          // toute génération en cours/à venir avant de fermer la ligne.
+          try {
+            session.interrupt();
+          } catch {
+            /* best-effort */
+          }
           setTimeout(
             () => void closeSession(`tool:${r}|${cause}`),
             END_CALL_TRAILING_MS,
