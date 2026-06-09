@@ -84,7 +84,7 @@ export async function fetchConfig(
   // Appel sortant de campagne : endpoint dédié (instructions bâties depuis
   // l'objectif/persona + variables du contact), gardé par x-internal-secret.
   const headers: Record<string, string> = {};
-  if (origin.kind === 'campaign') {
+  if (origin.kind === 'campaign' || origin.kind === 'outbound_test') {
     const secret = process.env['INTERNAL_SECRET'];
     if (secret) headers['x-internal-secret'] = secret;
   }
@@ -97,7 +97,9 @@ export async function fetchConfig(
           ? `${appUrl}/api/agent/config?userId=${encodeURIComponent(origin.userId)}`
           : origin.kind === 'campaign'
             ? `${appUrl}/api/agent/campaign-config?campaignId=${encodeURIComponent(origin.campaignId)}&contactId=${encodeURIComponent(origin.contactId)}`
-            : `${appUrl}/api/agent/config`;
+            : origin.kind === 'outbound_test'
+              ? `${appUrl}/api/agent/outbound-test-config?agentId=${encodeURIComponent(origin.agentId)}`
+              : `${appUrl}/api/agent/config`;
 
     const res = await fetch(url, {
       headers,

@@ -88,6 +88,34 @@ export function webUserIdOf(p: { metadata?: string }): string | null {
 }
 
 /**
+ * Détecte un participant « test live d'agent sortant » depuis sa metadata
+ * `{ source:'outbound_test', agentId, userId }` (émise par
+ * `/api/livekit/web-token` quand le dashboard teste un agent précis).
+ */
+export function outboundTestOf(
+  p: { metadata?: string },
+): { agentId: string; userId: string } | null {
+  if (!p.metadata) return null;
+  try {
+    const parsed = JSON.parse(p.metadata) as {
+      source?: string;
+      agentId?: string;
+      userId?: string;
+    };
+    if (
+      parsed.source === 'outbound_test' &&
+      typeof parsed.agentId === 'string' &&
+      typeof parsed.userId === 'string'
+    ) {
+      return { agentId: parsed.agentId, userId: parsed.userId };
+    }
+  } catch {
+    // pas un participant test-agent
+  }
+  return null;
+}
+
+/**
  * Détecte l'origine de la session en pollant les remoteParticipants
  * jusqu'à ce que les attributes / metadata arrivent. Le SDK LiveKit
  * publie ces données un beat après `connect()` retourne, donc on
@@ -175,7 +203,11 @@ export async function detectOrigin(
       const sip = sipToOf(p);
       if (sip.raw)
         return { kind: 'sip', calledNumber: sip.calledNumber, channel: sip.channel };
-      // 2. Web metadata (Phase 2 LiveTest)
+      // 2. Test live d'un agent sortant (dashboard) — AVANT le check web
+      //    générique car la metadata est aussi posée côté participant web.
+      const otest = outboundTestOf(p);
+      if (otest) return { kind: 'outbound_test', ...otest };
+      // 3. Web metadata (Phase 2 LiveTest entrant)
       const userId = webUserIdOf(p);
       if (userId) return { kind: 'web', userId };
     }

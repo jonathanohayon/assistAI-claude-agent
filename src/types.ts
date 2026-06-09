@@ -159,4 +159,9 @@ export type SessionOrigin =
   // vient de /api/agent/campaign-config et le recap part vers
   // /api/agent/campaign-result.
   | { kind: 'campaign'; campaignId: string; contactId: string; userId: string }
+  // Test LIVE d'un agent sortant depuis le dashboard (navigateur). La metadata
+  // de dispatch porte { source:'outbound_test', agentId, userId }. La config
+  // vient de /api/agent/outbound-test-config (voix/persona/connaissance de
+  // l'agent). Aucun recap (c'est un test).
+  | { kind: 'outbound_test'; agentId: string; userId: string }
   | { kind: 'unknown' };

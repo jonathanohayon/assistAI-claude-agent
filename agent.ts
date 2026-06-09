@@ -398,7 +398,9 @@ export default defineAgent<ProcessUserData>({
     // la transcription en temps réel. Pas applicable côté SIP (Twilio
     // n'écoute pas le data channel). Encodage JSON utf-8 simple.
     const publishWebTranscript = (entry: TranscriptEntry) => {
-      if (origin.kind !== 'web') return;
+      // Web (LiveTest entrant) ET test live d'agent sortant : la UI navigateur
+      // affiche la transcription via le data channel.
+      if (origin.kind !== 'web' && origin.kind !== 'outbound_test') return;
       try {
         const payload = new TextEncoder().encode(
           JSON.stringify({ type: 'transcript', ...entry }),
@@ -458,6 +460,8 @@ export default defineAgent<ProcessUserData>({
     const triggerRecap = async () => {
       if (recapSent) return;
       recapSent = true;
+      // Test live d'un agent (dashboard) → aucun recap ni persistance.
+      if (origin.kind === 'outbound_test') return;
       // Appel sortant de campagne → résultat vers /api/agent/campaign-result
       // (analyse IA + transition contact côté web), pas le pipeline inbound.
       if (origin.kind === 'campaign') {
