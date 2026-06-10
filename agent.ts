@@ -166,12 +166,9 @@ export default defineAgent<ProcessUserData>({
     // null si indispo → onEnter retombe sur l'accueil modèle.
     const dialedNumber =
       origin.kind === 'sip' ? origin.calledNumber : '';
+    // creds APP_URL/INTERNAL_SECRET désormais injectés par src/web-api.ts
     const openerPromise = dialedNumber
-      ? fetchOpenerPcm(
-          dialedNumber,
-          process.env['INTERNAL_SECRET'] ?? '',
-          process.env['APP_URL'] ?? '',
-        ).catch(() => null)
+      ? fetchOpenerPcm(dialedNumber).catch(() => null)
       : Promise.resolve(null);
 
     // ── OpenAI Realtime server-event timings ─────────────────────────────

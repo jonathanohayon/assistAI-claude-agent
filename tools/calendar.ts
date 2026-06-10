@@ -1,6 +1,9 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+// TODO(refactor en cours) : migrer makePost vers src/web-api.ts (webPost
+// accepte des headers custom pour x-tenant-phone / x-tenant-user-id).
+
 export interface ToolFeatures {
   /** Calendar tools : list_available_dates, check_availability, book_appointment,
    *  find_appointment, cancel_appointment, reschedule_appointment. */

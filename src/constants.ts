@@ -18,6 +18,17 @@ export const SILENCE_HANGUP_MS = Number(
 );
 
 /**
+ * Durée maximale absolue d'un appel avant raccroché forcé.
+ * 30 minutes par défaut — aucun appel légitime ne dure aussi longtemps ;
+ * au-delà c'est presque toujours une ligne zombie (SIP pas raccroché,
+ * boucle LLM, etc.) qui facture du Twilio + OpenAI pour rien.
+ * Override via `MAX_CALL_DURATION_MS` env var.
+ */
+export const MAX_CALL_DURATION_MS = Number(
+  process.env['MAX_CALL_DURATION_MS'] ?? 30 * 60_000,
+);
+
+/**
  * Hard-cap delay between an LLM-triggered end_call and the actual close.
  * On attend normalement la transition speaking → idle/listening (= goodbye
  * audio fini). Ce hard-cap est un safety net si l'event ne fire jamais
