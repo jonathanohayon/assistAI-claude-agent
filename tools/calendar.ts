@@ -51,12 +51,18 @@ const makePost =
         headers['x-tenant-user-id'] = ctx.tenantUserId;
       }
     }
+    // Mesure le round-trip worker→web (réseau Railway + traitement web + appel
+    // Google côté serveur). Couplé au log web `google_events_list_latency`,
+    // ça donne le découpage complet de la latence calendrier d'un appel.
+    const t0 = Date.now();
     const res = await fetch(`${ctx.appUrl}${path}`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     });
+    const ms = Date.now() - t0;
+    console.log(`[calendar-latency] ${path} → ${res.status} ${ms}ms`);
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`${path} → HTTP ${res.status} : ${text.slice(0, 200)}`);
