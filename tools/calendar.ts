@@ -104,14 +104,19 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const checkAvailability = llm.tool({
     description:
-      "Vérifie les créneaux disponibles pour une date + centre précis. Si la date ne matche pas le centre, l'API renvoie suggested_dates avec les prochaines dates valides — utilise-les directement. Si tu ne sais pas quelle date proposer, appelle d'abord list_available_dates(center).",
+      "Vérifie les créneaux disponibles pour une date + centre précis. PASSE la durée de la prestation (60 pour soin de la peau, 30 pour épilation) : un créneau n'est renvoyé que si la prestation ENTIÈRE y tient sans chevauchement. Si la date ne matche pas le centre, l'API renvoie suggested_dates avec les prochaines dates valides — utilise-les directement. Si tu ne sais pas quelle date proposer, appelle d'abord list_available_dates(center).",
     parameters: z.object({
       date: z.string().describe("Date au format YYYY-MM-DD (ex: 2026-05-12)."),
       center: CENTER_ENUM.nullish().describe(
         "Centre demandé par la cliente. Optionnel — laisse vide pour laisser l'API déterminer le centre du jour.",
       ),
+      duration: z
+        .number()
+        .int()
+        .nullish()
+        .describe("Durée de la prestation en minutes (60 soin de la peau, 30 épilation, défaut 30). Indispensable pour que les créneaux renvoyés tiennent vraiment."),
     }),
-    execute: async ({ date, center }) => {
+    execute: async ({ date, center, duration }) => {
       const data = await post<{
         date: string;
         center?: string;
@@ -126,6 +131,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       }>('/api/calendar/availability', {
         date,
         center: center ?? undefined,
+        duration: duration ?? 30,
       });
       // Wrong day for requested center → server already gave us the next
       // valid dates for that center. Surface them to the LLM verbatim.
@@ -204,6 +210,15 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         if (data.error === 'wrong_day_for_center') {
           const next = formatSuggested(data.suggested_dates);
           return `${data.message ?? data.error}${next ? ` Propose plutôt : ${next}.` : ''}`;
+        }
+        // Overlap with an existing booking — REFUSÉ côté serveur. Le message
+        // contient déjà les créneaux libres : propose-les, ne réessaie jamais
+        // la même heure.
+        if (data.error === 'slot_conflict') {
+          return (
+            data.message ??
+            "Ce créneau chevauche un rendez-vous existant. Propose une autre heure."
+          );
         }
         if (data.expectedLabel) {
           return `${data.error} (Le bon centre pour le ${date} est ${data.expectedLabel}.)`;
@@ -298,23 +313,43 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const rescheduleAppointment = llm.tool({
     description:
-      "Déplace un rendez-vous existant à une nouvelle date/heure. Utilise l'eventId de find_appointment.",
+      "Déplace un rendez-vous existant à une nouvelle date/heure. Utilise l'eventId de find_appointment. Déduis le centre de la NOUVELLE date (LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem) — déplacer vers un autre jour peut changer de centre.",
     parameters: z.object({
       event_id: z.string().describe("Identifiant Google Calendar de l'événement."),
       new_date: z.string().describe("Nouvelle date (YYYY-MM-DD)."),
       new_time: z.string().describe("Nouvelle heure (HH:MM, 24h)."),
+      center: CENTER_ENUM.nullish().describe(
+        "Centre attendu pour la nouvelle date — déduis-le du jour (LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem). Optionnel : laisse vide pour laisser l'API calculer.",
+      ),
       duration: z.number().int().nullish().describe("Durée en minutes. Si omis, garde la durée actuelle."),
     }),
-    execute: async ({ event_id, new_date, new_time, duration }) => {
-      const data = await post<{ success?: boolean; summary?: string; error?: string }>(
-        '/api/calendar/reschedule',
-        {
-          eventId: event_id,
-          newDate: new_date,
-          newTime: new_time,
-          duration: duration ?? undefined,
-        },
-      );
+    execute: async ({ event_id, new_date, new_time, center, duration }) => {
+      const data = await post<{
+        success?: boolean;
+        summary?: string;
+        error?: string;
+        message?: string;
+        expectedLabel?: string;
+        suggested_dates?: SuggestedDate[];
+      }>('/api/calendar/reschedule', {
+        eventId: event_id,
+        newDate: new_date,
+        newTime: new_time,
+        center: center ?? undefined,
+        duration: duration ?? undefined,
+      });
+      // Mauvais centre pour le jour → l'API renvoie les prochaines dates valides.
+      if (data.error === 'wrong_day_for_center') {
+        const next = formatSuggested(data.suggested_dates);
+        return `${data.message ?? data.error}${next ? ` Propose plutôt : ${next}.` : ''}`;
+      }
+      // Overlap refusé côté serveur : le message liste les créneaux libres.
+      if (data.error === 'slot_conflict') {
+        return (
+          data.message ??
+          'Ce créneau chevauche un rendez-vous existant. Propose une autre heure.'
+        );
+      }
       return data.summary ?? data.error ?? 'RDV déplacé.';
     },
   });
