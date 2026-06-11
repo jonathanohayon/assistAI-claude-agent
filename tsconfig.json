@@ -28,6 +28,6 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["agent.ts", "tools/**/*.ts"],
+  "include": ["agent.ts", "config.ts", "tools/**/*.ts", "src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

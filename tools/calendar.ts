@@ -1,8 +1,7 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
-// TODO(refactor en cours) : migrer makePost vers src/web-api.ts (webPost
-// accepte des headers custom pour x-tenant-phone / x-tenant-user-id).
+import { webPost } from '../src/web-api.js';
 
 export interface ToolFeatures {
   /** Calendar tools : list_available_dates, check_availability, book_appointment,
@@ -13,17 +12,19 @@ export interface ToolFeatures {
 }
 
 export interface ToolContext {
-  appUrl: string;
   /** E.164 number that was dialed — used by the web service to route to the
    *  right tenant's Google Calendar/Sheet for SIP calls. Empty for web
-   *  LiveTest sessions ; on retombe sur `tenantUserId` pour le routing. */
+   *  LiveTest sessions ; on retombe sur `tenantUserId` pour le routing.
+   *  Snapshot à la construction — préférer `getDialedPhone` (live). */
   dialedPhone: string;
+  /** Live getter du numéro composé — les attrs SIP peuvent arriver APRÈS
+   *  la construction des tools (et après le timeout de detectOrigin). Lu
+   *  au moment de chaque requête (miroir du pattern getCallerPhone) pour
+   *  éviter un x-tenant-phone manquant → fallback cross-tenant côté web. */
+  getDialedPhone?: () => string;
   /** User UUID du tenant — utilisé pour le routing tenant côté web quand
-   *  `dialedPhone` est vide (cas web LiveTest). Header `x-tenant-user-id`. */
+   *  le numéro composé est vide (cas web LiveTest). Header `x-tenant-user-id`. */
   tenantUserId: string;
-  /** INTERNAL_SECRET shared between agent and web — authorizes per-tenant
-   *  routing on /api/calendar/* and /api/sheets/contact. */
-  internalSecret: string;
   /** Live caller number getter — populated AFTER ToolContext construction
    *  via SIP attributes. The take_message tool reads it at invoke time so
    *  late-arriving attributes are picked up. Returns '' if unknown. */
@@ -36,31 +37,23 @@ export interface ToolContext {
 const makePost =
   (ctx: ToolContext) =>
   async <T>(path: string, body: unknown): Promise<T> => {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    // Toujours envoyer x-internal-secret (authentifie le worker auprès du
-    // web). Pour le tenant routing, prefer x-tenant-phone (SIP) sinon
-    // fallback sur x-tenant-user-id (web LiveTest). Au moins un des deux
-    // doit être présent pour que le web sache quel Google calendar utiliser.
-    if (ctx.internalSecret) {
-      headers['x-internal-secret'] = ctx.internalSecret;
-      if (ctx.dialedPhone) {
-        headers['x-tenant-phone'] = ctx.dialedPhone;
-      } else if (ctx.tenantUserId) {
-        headers['x-tenant-user-id'] = ctx.tenantUserId;
-      }
+    // Routing tenant : prefer x-tenant-phone (SIP) sinon fallback sur
+    // x-tenant-user-id (web LiveTest). Au moins un des deux doit être
+    // présent pour que le web sache quel Google calendar utiliser.
+    // x-internal-secret + Content-Type sont posés par webPost.
+    // Numéro composé lu LIVE à chaque requête (attrs SIP tardifs).
+    const dialedPhone = ctx.getDialedPhone?.() || ctx.dialedPhone;
+    const headers: Record<string, string> = {};
+    if (dialedPhone) {
+      headers['x-tenant-phone'] = dialedPhone;
+    } else if (ctx.tenantUserId) {
+      headers['x-tenant-user-id'] = ctx.tenantUserId;
     }
     // Mesure le round-trip worker→web (réseau Railway + traitement web + appel
     // Google côté serveur). Couplé au log web `google_events_list_latency`,
     // ça donne le découpage complet de la latence calendrier d'un appel.
     const t0 = Date.now();
-    const res = await fetch(`${ctx.appUrl}${path}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await webPost(path, body, { headers, timeoutMs: 10_000 });
     const ms = Date.now() - t0;
     console.log(`[calendar-latency] ${path} → ${res.status} ${ms}ms`);
     if (!res.ok) {
@@ -189,7 +182,6 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       if (!resolvedPhone) {
         return "Erreur : aucun numéro de téléphone fourni et caller-ID indisponible (numéro masqué). Demande à la cliente son numéro pour finaliser la réservation.";
       }
-      phone = resolvedPhone;
       const data = await post<{
         success?: boolean;
         summary?: string;
@@ -199,7 +191,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         suggested_dates?: SuggestedDate[];
       }>('/api/calendar/book', {
         name,
-        phone,
+        phone: resolvedPhone,
         date,
         time,
         center,
@@ -226,7 +218,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         const notes = `RDV ${date} ${time}${description ? ` — ${description}` : ''}`;
         post('/api/sheets/contact', {
           name,
-          phone,
+          phone: resolvedPhone,
           email: email ?? undefined,
           notes,
         }).catch((e) => console.error('save_contact (auto) failed:', e));
