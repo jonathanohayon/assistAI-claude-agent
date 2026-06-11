@@ -26,6 +26,7 @@ import type {
   FetchedConfig,
   SessionOrigin,
 } from './types.js';
+import { webGet } from './web-api.js';
 
 /**
  * Permissif par défaut — si le fetch échoue ou si l'admin n'a pas encore
@@ -75,36 +76,27 @@ export function defaultConfig(): FetchedConfig {
 export async function fetchConfig(
   origin: SessionOrigin,
 ): Promise<FetchedConfig> {
-  const appUrl = process.env['APP_URL'];
-  if (!appUrl) {
+  if (!process.env['APP_URL']) {
     console.warn('[config] APP_URL not set, using compiled defaults');
     return defaultConfig();
   }
 
-  // Appel sortant de campagne : endpoint dédié (instructions bâties depuis
-  // l'objectif/persona + variables du contact), gardé par x-internal-secret.
-  const headers: Record<string, string> = {};
-  if (origin.kind === 'campaign' || origin.kind === 'outbound_test') {
-    const secret = process.env['INTERNAL_SECRET'];
-    if (secret) headers['x-internal-secret'] = secret;
-  }
-
   try {
-    const url =
+    // Endpoint par origine. campaign/outbound_test ont un endpoint dédié
+    // (instructions bâties depuis l'objectif/persona + variables du contact).
+    // Le header x-internal-secret est posé par webGet pour tous.
+    const path =
       origin.kind === 'sip'
-        ? `${appUrl}/api/agent/config?phone=${encodeURIComponent(origin.calledNumber)}`
+        ? `/api/agent/config?phone=${encodeURIComponent(origin.calledNumber)}`
         : origin.kind === 'web'
-          ? `${appUrl}/api/agent/config?userId=${encodeURIComponent(origin.userId)}`
+          ? `/api/agent/config?userId=${encodeURIComponent(origin.userId)}`
           : origin.kind === 'campaign'
-            ? `${appUrl}/api/agent/campaign-config?campaignId=${encodeURIComponent(origin.campaignId)}&contactId=${encodeURIComponent(origin.contactId)}`
+            ? `/api/agent/campaign-config?campaignId=${encodeURIComponent(origin.campaignId)}&contactId=${encodeURIComponent(origin.contactId)}`
             : origin.kind === 'outbound_test'
-              ? `${appUrl}/api/agent/outbound-test-config?agentId=${encodeURIComponent(origin.agentId)}`
-              : `${appUrl}/api/agent/config`;
+              ? `/api/agent/outbound-test-config?agentId=${encodeURIComponent(origin.agentId)}`
+              : `/api/agent/config`;
 
-    const res = await fetch(url, {
-      headers,
-      signal: AbortSignal.timeout(CONFIG_FETCH_TIMEOUT_MS),
-    });
+    const res = await webGet(path, { timeoutMs: CONFIG_FETCH_TIMEOUT_MS });
     if (!res.ok) {
       console.warn(
         `[config] /api/agent/config → ${res.status}, using defaults`,

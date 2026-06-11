@@ -38,16 +38,21 @@ import { fetchConfig } from './src/config-fetcher.js';
 import {
   END_CALL_HARD_CAP_MS,
   END_CALL_TRAILING_MS,
+  MAX_CALL_DURATION_MS,
   SILENCE_GRACE_START_MS,
   SILENCE_HANGUP_MS,
 } from './src/constants.js';
 import { requireEnv } from './src/env.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
+import { sniffLang } from './src/lang-sniff.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
+import { buildPerCallContext } from './src/per-call-context.js';
+import { toIsraeliLocal } from './src/phone.js';
 import { postCallEnd, postCampaignResult } from './src/post-call.js';
 import { computeRealtimeCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
+import { extractText } from './src/transcript.js';
 import type {
   ProcessUserData,
   TranscriptEntry,
@@ -68,6 +73,14 @@ export default defineAgent<ProcessUserData>({
   // Les events OpenAI input_audio_buffer.speech_started / stopped
   // suffisent pour gérer l'interrupt côté agent SDK.
   prewarm: async () => {
+    // Fail-fast : valider la clé API Realtime AVANT qu'un appel sonne.
+    // Sans clé, chaque appel entrant crasherait au moment de construire le
+    // RealtimeModel (client entend du silence puis raccroche). Throw ici =
+    // le worker ne s'enregistre pas auprès de LiveKit → l'erreur est
+    // visible au boot Railway, pas au premier appel. Le requireEnv per-call
+    // dans entry() est conservé (belt & braces).
+    if (!process.env['REALTIME_API_KEY']) requireEnv('OPENAI_API_KEY');
+
     // Probe région : mesure RTT réels depuis le container LK Cloud Agent
     // vers Twilio / LK SFU / OpenAI / Web. Loggé dans /dashboard/logs
     // sous l'event `infra_region_probe` pour corréler env INFRA_* vs réalité.
@@ -142,7 +155,8 @@ export default defineAgent<ProcessUserData>({
         : origin.kind === 'web'
           ? `Web user ${origin.userId}`
           : '(origine inconnue)';
-    await remoteLog(
+    // fire-and-forget : ne jamais bloquer le chemin d'appel sur la télémétrie
+    void remoteLog(
       'agent',
       'call_started',
       `Session démarrée — ${originLabel}`,
@@ -152,7 +166,8 @@ export default defineAgent<ProcessUserData>({
 
     const cfg = await fetchConfig(origin);
     tConfigFetched = Date.now();
-    await remoteLog(
+    // fire-and-forget : ne jamais bloquer le chemin d'appel sur la télémétrie
+    void remoteLog(
       'agent',
       'config_loaded',
       `Config chargée : ${cfg.model} / ${cfg.voice} / t°${cfg.temperature}`,
@@ -166,12 +181,9 @@ export default defineAgent<ProcessUserData>({
     // null si indispo → onEnter retombe sur l'accueil modèle.
     const dialedNumber =
       origin.kind === 'sip' ? origin.calledNumber : '';
+    // creds APP_URL/INTERNAL_SECRET désormais injectés par src/web-api.ts
     const openerPromise = dialedNumber
-      ? fetchOpenerPcm(
-          dialedNumber,
-          process.env['INTERNAL_SECRET'] ?? '',
-          process.env['APP_URL'] ?? '',
-        ).catch(() => null)
+      ? fetchOpenerPcm(dialedNumber).catch(() => null)
       : Promise.resolve(null);
 
     // ── OpenAI Realtime server-event timings ─────────────────────────────
@@ -351,6 +363,19 @@ export default defineAgent<ProcessUserData>({
     let toNumber = origin.kind === 'sip' ? origin.calledNumber : '';
     let recapSent = false;
 
+    /**
+     * Capture les numéros SIP (From/To) depuis les attributes d'un
+     * participant remote et met à jour `fromNumber`/`toNumber`.
+     *
+     * Contrat :
+     *   - Synchrone, n'await rien, ne throw jamais (lecture d'attributes).
+     *   - Idempotent : ré-appelable à chaque event participant ; n'écrase
+     *     une valeur déjà capturée QUE si l'attribute est présent (un
+     *     event tardif sans attrs ne vide pas un numéro déjà résolu).
+     *   - Safe à appeler à tout moment après `ctx.connect()` — branché sur
+     *     ParticipantConnected + ParticipantAttributesChanged car les
+     *     attrs SIP arrivent souvent APRÈS la connexion (race Twilio).
+     */
     const captureNumbers = (p: {
       attributes: Record<string, string>;
       identity: string;
@@ -369,34 +394,19 @@ export default defineAgent<ProcessUserData>({
       captureNumbers(p);
     });
 
-    // Extract plain text from a ChatMessage content[] entry. Realtime models
-    // emit objects like { type: 'audio', transcript: '...' } or
-    // { type: 'text', text: '...' } rather than raw strings, so we probe the
-    // common fields before giving up.
-    const extractText = (content: unknown): string => {
-      if (!content) return '';
-      if (typeof content === 'string') return content;
-      if (Array.isArray(content)) {
-        return content.map(extractText).filter(Boolean).join(' ').trim();
-      }
-      if (typeof content === 'object') {
-        const obj = content as Record<string, unknown>;
-        for (const key of ['transcript', 'text', 'content']) {
-          const v = obj[key];
-          if (typeof v === 'string' && v.trim()) return v;
-          if (Array.isArray(v)) {
-            const joined = extractText(v);
-            if (joined) return joined;
-          }
-        }
-      }
-      return '';
-    };
-
-    // Pour les sessions web (LiveTest navigateur), publish chaque turn sur
-    // le data channel de la room afin que la UI navigateur puisse afficher
-    // la transcription en temps réel. Pas applicable côté SIP (Twilio
-    // n'écoute pas le data channel). Encodage JSON utf-8 simple.
+    /**
+     * Publie un tour de transcript sur le data channel de la room pour que
+     * la UI navigateur (LiveTest entrant / test live d'agent sortant)
+     * affiche la transcription en temps réel. Encodage JSON utf-8 simple.
+     *
+     * Contrat :
+     *   - No-op pour les origines non-web (SIP/campagne : Twilio n'écoute
+     *     pas le data channel).
+     *   - Best-effort, ne throw jamais (publishData wrappé try/catch) et
+     *     n'await rien — `publishData` est fire-and-forget côté SDK.
+     *   - Safe à appeler à tout moment, y compris pendant la fermeture
+     *     (un publish raté est juste warn en console).
+     */
     const publishWebTranscript = (entry: TranscriptEntry) => {
       // Web (LiveTest entrant) ET test live d'agent sortant : la UI navigateur
       // affiche la transcription via le data channel.
@@ -423,13 +433,12 @@ export default defineAgent<ProcessUserData>({
       const entry: TranscriptEntry = { role: 'user', text };
       transcript.push(entry);
       publishWebTranscript(entry);
-      // Cheap charset-based language sniff: log the dominant script so we
-      // can verify after the fact that Hebrew turns are transcribed as
-      // Hebrew, not as French gibberish (whisper-1 used to do that).
-      const hebrewChars = (text.match(/[֐-׿]/g) ?? []).length;
-      const latinChars = (text.match(/[A-Za-zÀ-ÿ]/g) ?? []).length;
-      const langSniff =
-        hebrewChars > latinChars ? 'he' : latinChars > 0 ? 'lat' : '?';
+      // Sniff charset cheap : log le script dominant pour vérifier après
+      // coup que les tours hébreux sont transcrits en hébreu, pas en
+      // charabia français (whisper-1 faisait ça). Unifié (2026-06) sur la
+      // variante STRICTE de src/lang-sniff.ts — même fonction que le
+      // language-enforcement de onUserTurnCompleted.
+      const langSniff = sniffLang(text) ?? '?';
       console.log(
         `[lang_sniff] user turn: ${langSniff} | "${text.slice(0, 60)}"`,
       );
@@ -457,6 +466,22 @@ export default defineAgent<ProcessUserData>({
     });
 
     // ── End-of-call recap ───────────────────────────────────────────────
+    /**
+     * Déclenche le pipeline post-appel selon l'origine : campagne →
+     * `/api/agent/campaign-result`, inbound (SIP/web) → `/api/calls/end`,
+     * test live → rien.
+     *
+     * Contrat :
+     *   - Idempotent : le flag `recapSent` garantit un seul envoi même si
+     *     appelé plusieurs fois (Close event + finally).
+     *   - Awaité jusqu'au POST final inclus (retries/backoff compris, cf.
+     *     src/post-call.ts) — l'appelant DOIT await pour ne pas tuer le
+     *     process avant l'envoi. Ne throw jamais (postCallEnd /
+     *     postCampaignResult sont best-effort avec dump de recovery).
+     *   - Safe à appeler dès que `transcript`/`fromNumber`/`toNumber` sont
+     *     déclarés ; en pratique appelé uniquement dans le finally de
+     *     entry() une fois la session fermée.
+     */
     const triggerRecap = async () => {
       if (recapSent) return;
       recapSent = true;
@@ -497,10 +522,26 @@ export default defineAgent<ProcessUserData>({
     const resetActivity = () => {
       lastActivity = Date.now();
     };
+    /**
+     * Ferme la session ET raccroche réellement la ligne (deleteRoom — sans
+     * ça Twilio garde la ligne SIP ouverte et facture).
+     *
+     * Contrat :
+     *   - Idempotent : le guard `closing` rend tout appel concurrent ou
+     *     répété no-op — safe depuis le watchdog, end_call, le catch de
+     *     session.start(), etc., sans coordination.
+     *   - Awaité : `session.close()` puis `svc.deleteRoom()`. Les deux sont
+     *     wrappés try/catch → la fonction ne throw jamais.
+     *   - La télémétrie (`auto_hangup`) est fire-and-forget, jamais sur le
+     *     chemin de fermeture.
+     *   - Safe à appeler à TOUT moment après la création de `session`,
+     *     y compris si `session.start()` n'a jamais abouti.
+     */
     const closeSession = async (reason: string) => {
       if (closing) return;
       closing = true;
-      await remoteLog(
+      // fire-and-forget : ne jamais bloquer le chemin d'appel sur la télémétrie
+      void remoteLog(
         'agent',
         'auto_hangup',
         `Hangup auto: ${reason}`,
@@ -544,7 +585,9 @@ export default defineAgent<ProcessUserData>({
     //   - Manual fallback (greetingMs / wallclockTurnLatenciesMs) en cas
     //     où les métriques natives ne fire pas (différence de provider,
     //     cancelled responses, etc.) — sert aussi de cross-check.
-    let sessionStartedAtMs: number | null = null;
+    // Posé APRÈS session.start() (session prête à parler) — à ne pas
+    // confondre avec `sessionStartedAt` (début d'appel, base des watchdogs).
+    let sessionReadyAtMs: number | null = null;
     let greetingMs: number | null = null;
     // 'prerendered' = accueil joué via session.say (audio pré-généré), 'model'
     // = accueil généré par le LLM (fallback). Loggé dans call_metrics.
@@ -648,8 +691,8 @@ export default defineAgent<ProcessUserData>({
       // active processing.
       if (next && next !== 'listening') resetActivity();
       // First time the agent starts speaking after session start = greeting.
-      if (next === 'speaking' && greetingMs === null && sessionStartedAtMs !== null) {
-        greetingMs = Date.now() - sessionStartedAtMs;
+      if (next === 'speaking' && greetingMs === null && sessionReadyAtMs !== null) {
+        greetingMs = Date.now() - sessionReadyAtMs;
       }
       // Agent reply just started → close the per-turn responsiveness window.
       if (next === 'speaking' && lastUserDoneAtMs !== null) {
@@ -662,6 +705,15 @@ export default defineAgent<ProcessUserData>({
 
     const silenceWatcher = setInterval(() => {
       if (closing) return;
+      // Hard-cap durée d'appel : au-delà de MAX_CALL_DURATION_MS, c'est
+      // presque toujours une ligne zombie (SIP pas raccroché, boucle LLM)
+      // qui facture Twilio + OpenAI pour rien. Même chemin de fermeture
+      // que le silence, quel que soit l'état de l'agent.
+      if (Date.now() - sessionStartedAt > MAX_CALL_DURATION_MS) {
+        clearInterval(silenceWatcher);
+        void closeSession('max_duration');
+        return;
+      }
       // Grace period at the start: don't hang up just because the customer
       // takes a beat to respond to the greeting.
       if (Date.now() - sessionStartedAt < SILENCE_GRACE_START_MS) return;
@@ -697,9 +749,13 @@ export default defineAgent<ProcessUserData>({
         // hold a small trailing window for the SIP RTP buffer to drain.
         // Hard cap is a safety net.
         let closed = false;
+        // Id du setTimeout hard-cap — clear dans finish() quand le chemin
+        // nominal (speech_done) gagne, pour ne pas laisser un timer mort.
+        let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
         const finish = (cause: string) => {
           if (closed) return;
           closed = true;
+          if (hardCapTimer !== undefined) clearTimeout(hardCapTimer);
           // Le résultat du tool est réinjecté au LLM, qui génère une réponse
           // de suivi → l'agent redit "au revoir" une fois de trop avant la
           // fermeture. Une fois l'au revoir réellement prononcé, on coupe
@@ -730,7 +786,7 @@ export default defineAgent<ProcessUserData>({
           }
         };
         session.on(voice.AgentSessionEventTypes.AgentStateChanged, stateHandler);
-        setTimeout(() => {
+        hardCapTimer = setTimeout(() => {
           session.off(
             voice.AgentSessionEventTypes.AgentStateChanged,
             stateHandler,
@@ -847,10 +903,11 @@ export default defineAgent<ProcessUserData>({
         const text = extractText(newMessage.content).trim();
         if (!text) return;
 
-        const hebrewChars = (text.match(/[֐-׿]/g) ?? []).length;
-        const latinChars = (text.match(/[A-Za-zÀ-ÿ]/g) ?? []).length;
-        const userLang: 'he' | 'lat' =
-          hebrewChars > latinChars && hebrewChars > 0 ? 'he' : 'lat';
+        // Variante STRICTE de src/lang-sniff.ts (hébreu seulement si
+        // majoritaire ET présent) — unifiée avec le log [lang_sniff] de
+        // UserInputTranscribed. `null` (aucun char alphabétique : chiffres,
+        // ponctuation) → 'lat', comme l'inline historique.
+        const userLang: 'he' | 'lat' = sniffLang(text) ?? 'lat';
 
         // Compact + transition-only : inject seulement quand la langue
         // user CHANGE vs le tour précédent (pas à chaque tour HE répété).
@@ -889,15 +946,18 @@ export default defineAgent<ProcessUserData>({
     // web puisse router vers le bon Google calendar via x-tenant-user-id.
     const tenantUserId = origin.kind === 'web' ? origin.userId : '';
     const calendarTools = makeCalendarTools({
-      appUrl: process.env['APP_URL'] ?? 'http://localhost:3002',
       dialedPhone: toNumber,
+      // Live getter — les attrs SIP peuvent arriver APRÈS la construction
+      // des tools (et après le timeout de detectOrigin) : un `dialedPhone`
+      // capturé par valeur resterait vide → x-tenant-phone manquant →
+      // fallback cross-tenant côté web. Lu au moment de chaque requête,
+      // miroir exact du pattern getCallerPhone.
+      getDialedPhone: () => toNumber,
       tenantUserId,
-      internalSecret,
       // Live getter — fromNumber may arrive AFTER tools are built (SIP attrs
       // race). Convert +972 → 0 here too so the WhatsApp the owner reads
       // shows the local format directly.
-      getCallerPhone: () =>
-        fromNumber.startsWith('+972') ? '0' + fromNumber.slice(4) : fromNumber,
+      getCallerPhone: () => toIsraeliLocal(fromNumber),
       // Plan features → drive quels tools sont enregistrés (calendar/crm).
       // Si le tenant a calendar=false, le modèle ne verra même pas les
       // tools check_availability/book_appointment/... et ne pourra donc
@@ -908,95 +968,15 @@ export default defineAgent<ProcessUserData>({
       },
     });
 
-    // Current date/time in Jerusalem — injected so the LLM can resolve
-    // relative dates ("demain", "lundi prochain") correctly. Without this,
-    // the realtime model has zero clock awareness and either hallucinates
-    // or asks. Date is in French long form for natural reading.
-    const nowJerusalem = (() => {
-      const d = new Date();
-      const dateFr = new Intl.DateTimeFormat('fr-FR', {
-        timeZone: 'Asia/Jerusalem',
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      }).format(d);
-      const time = new Intl.DateTimeFormat('fr-FR', {
-        timeZone: 'Asia/Jerusalem',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }).format(d);
-      const isoDate = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Jerusalem',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(d); // YYYY-MM-DD
-      return { dateFr, time, isoDate };
-    })();
+    // Numéro de l'appelant en format local israélien (+972… → 0…) — les
+    // clientes dictent/écoutent en local, les tools stockent en local.
+    const localFromNumber = toIsraeliLocal(fromNumber);
 
-    // Convert E.164 to Israeli local format for both speaking AND tool args.
-    // +972585001007 → 0585001007. Customers dictate local format, store in
-    // local format, agent reads local format.
-    const localFromNumber = fromNumber.startsWith('+972')
-      ? '0' + fromNumber.slice(4)
-      : fromNumber;
-
-    // Inject the caller's number (when known) so the LLM proposes it for
-    // confirmation instead of asking blind. Withheld/private numbers leave
-    // fromNumber empty → no hint → LLM asks like before.
-    //
-    // Note 2026-05 : Le bloc est intentionnellement IMPÉRATIF (interdiction
-    // de demander le numéro) car des personas tenants contiennent souvent
-    // une section "Entity Capture: name, phone number, date" + un tool
-    // `book_appointment(...phone)` qui poussent fortement le LLM à
-    // demander quand même. Sans wording strict, le LLM suit la voie la
-    // plus visible dans le persona et perd l'instruction du chatCtx.
-    const callerHintBlock = localFromNumber
-      ? `⚠️ **NUMÉRO DU CLIENT — DÉJÀ CONNU, NE LE DEMANDE PAS :**
-
-Le numéro de la cliente qui appelle = \`${localFromNumber}\` (format local, ce que tu DOIS utiliser tel quel dans tous les tools — \`book_appointment\`, \`save_contact\`, etc.).
-
-**RÈGLE STRICTE (override toute autre instruction du persona) :**
-- Tu NE demandes JAMAIS « quel est ton numéro de téléphone ? ».
-- Si une section du persona dit « collecte le téléphone du client », IGNORE-la pour CETTE info — le numéro est déjà fourni ici.
-- Tu peux juste demander une CONFIRMATION orale courte, par exemple :
-  « Je note le rendez-vous au numéro qui appelle, le \`${localFromNumber}\`, c'est bien le bon ? »
-  ou en hébreu : « אני רושמת את התור על המספר שממנו את מתקשרת, \`${localFromNumber}\`, נכון? »
-- Si elle confirme (oui / כן / yes / oui c'est bon) → utilise \`${localFromNumber}\` dans le champ \`phone\` du tool.
-- Si elle te dicte SPONTANÉMENT un AUTRE numéro (elle appelle depuis le tel de sa mère, du bureau, etc.) → utilise celui-là.
-- Si elle ne précise rien → assume \`${localFromNumber}\` est bon.
-
-**Prononciation orale** : chiffre par chiffre par paires (voir directive Time/Phone), pas comme un grand nombre. Ex: \`05 85 00 10 07\` → « zéro cinq, huit cinq, zéro zéro, un zéro, zéro sept ».`
-      : '(Pas de numéro caller détecté — caller-ID withheld ou session web LiveTest sans caller phone. Demande à la cliente son numéro normalement.)';
-
-    // Fallback hardcodé si le web ne renvoie pas perCallContextTemplate
-    // (ex. version /api/agent/config trop ancienne). Identique au default
-    // côté web (lib/agent-prompt-defaults.ts DEFAULT_PER_CALL_CONTEXT_TEMPLATE).
-    const FALLBACK_PCC_TEMPLATE = `
-──────────────────────────────────────────
-**CONTEXTE TEMPOREL (Asia/Jerusalem)**
-- Aujourd'hui : {date_fr} (\`{iso_date}\`)
-- Heure locale : {time}
-- Fuseau de référence : Asia/Jerusalem (toutes les dates et heures que tu manipules sont dans ce fuseau)
-
-Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → calcule la date YYYY-MM-DD à partir d'aujourd'hui ci-dessus AVANT d'appeler un tool. Ne demande JAMAIS la date complète à la cliente, ce serait étrange ("c'est quel jour aujourd'hui ?").
-──────────────────────────────────────────
-
-──────────────────────────────────────────
-**NUMÉRO DU CLIENT (détecté via l'appel)**
-{caller_hint_block}
-──────────────────────────────────────────`;
-
-    // Substitue les placeholders runtime dans le template per-call (édité
-    // depuis /admin). Si le placeholder est absent, no-op silencieux.
-    const pccTemplate = cfg.perCallContextTemplate?.trim() || FALLBACK_PCC_TEMPLATE;
-    const PER_CALL_CONTEXT = pccTemplate
-      .replaceAll('{date_fr}', nowJerusalem.dateFr)
-      .replaceAll('{iso_date}', nowJerusalem.isoDate)
-      .replaceAll('{time}', nowJerusalem.time)
-      .replaceAll('{caller_hint_block}', callerHintBlock);
+    // Contexte per-call (date/heure Jérusalem + caller-hint substitués dans
+    // le template per-plan ou le fallback) — assemblé par
+    // src/per-call-context.ts, extrait verbatim de l'inline historique.
+    const { perCallContext: PER_CALL_CONTEXT, callerHintBlock } =
+      buildPerCallContext(localFromNumber, cfg.perCallContextTemplate);
 
     // cfg.instructions vient déjà mergé depuis /api/agent/config — il inclut
     // les directives système (spoken_time, spoken_phone, hangup), la persona
@@ -1004,6 +984,38 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
     // Le worker ne hardcode plus aucun bloc système : tout est pilotable
     // depuis /admin.
     const STATIC_INSTRUCTIONS = cfg.instructions;
+
+    // Tools business structurés (list_centres, get_centre_info,
+    // get_opening_hours, list_services, find_service) — depuis la struct
+    // `agent_configs.business` du tenant. 5 tools fixes (un par opération)
+    // au lieu d'un tool par business comme le legacy `knowledge`.
+    // Construits UNE fois — réutilisés pour le log chatctx_snapshot ET
+    // l'enregistrement sur l'agent.
+    const businessTools = makeBusinessTools(cfg.business);
+    const businessNames = Object.keys(businessTools);
+    if (businessNames.length > 0) {
+      void remoteLog(
+        'agent',
+        'business_tools_registered',
+        `Tools business enregistrés : ${businessNames.join(', ')}`,
+        'info',
+        { count: businessNames.length, names: businessNames },
+      );
+    }
+
+    // Tools legacy `knowledge` — gardés en parallèle pour fallback si le
+    // tenant n'a pas encore migré vers business. À droper en release N+1.
+    const knowledgeTools = makeKnowledgeTools(cfg.knowledge);
+    const knowledgeNames = Object.keys(knowledgeTools);
+    if (knowledgeNames.length > 0) {
+      void remoteLog(
+        'agent',
+        'knowledge_tools_registered',
+        `Tools knowledge (legacy) enregistrés : ${knowledgeNames.join(', ')}`,
+        'info',
+        { count: knowledgeNames.length, names: knowledgeNames },
+      );
+    }
 
     // Snapshot du contexte LLM pour audit/debug dans /dashboard/logs.
     // Cet event matérialise ce qui sera EXACTEMENT envoyé à OpenAI :
@@ -1040,42 +1052,12 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
                 'reschedule_appointment',
               ]
             : []),
-          ...Object.keys(makeBusinessTools(cfg.business)),
-          ...Object.keys(makeKnowledgeTools(cfg.knowledge)),
+          ...businessNames,
+          ...knowledgeNames,
           'end_call',
         ],
       },
     );
-
-    // Tools business structurés (list_centres, get_centre_info,
-    // get_opening_hours, list_services, find_service) — depuis la struct
-    // `agent_configs.business` du tenant. 5 tools fixes (un par opération)
-    // au lieu d'un tool par business comme le legacy `knowledge`.
-    const businessTools = makeBusinessTools(cfg.business);
-    const businessNames = Object.keys(businessTools);
-    if (businessNames.length > 0) {
-      void remoteLog(
-        'agent',
-        'business_tools_registered',
-        `Tools business enregistrés : ${businessNames.join(', ')}`,
-        'info',
-        { count: businessNames.length, names: businessNames },
-      );
-    }
-
-    // Tools legacy `knowledge` — gardés en parallèle pour fallback si le
-    // tenant n'a pas encore migré vers business. À droper en release N+1.
-    const knowledgeTools = makeKnowledgeTools(cfg.knowledge);
-    const knowledgeNames = Object.keys(knowledgeTools);
-    if (knowledgeNames.length > 0) {
-      void remoteLog(
-        'agent',
-        'knowledge_tools_registered',
-        `Tools knowledge (legacy) enregistrés : ${knowledgeNames.join(', ')}`,
-        'info',
-        { count: knowledgeNames.length, names: knowledgeNames },
-      );
-    }
 
     // chatCtx initial : on y place le PER_CALL_CONTEXT (system message) pour
     // qu'il soit synchronisé pendant session.start() au lieu d'un round-trip
@@ -1105,34 +1087,51 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
     });
 
     try {
-      await session.start({
-        agent,
-        room: ctx.room,
-        inputOptions: {
-          // ai-coustics Quail Voice Focus 2.1 L — UNIQUE étage de
-          // noise reduction côté tel (OpenAI near_field désactivé
-          // plus haut pour éviter double pass redondant).
-          //   - enhancementLevel dérivé du slider 1-10 (cf. /dashboard
-          //     "Réduction de bruit") : 1 ≈ 0.1 (quasi-passthrough),
-          //     8 ≈ 0.8 (équilibré, recommandé téléphonie), 10 = 1.0
-          //     (agressif, peut couper la queue de phonèmes).
-          //   - VAD inhérent au modèle, tuné pour réponse rapide
-          //     (speechHoldDuration 30ms, sensitivity 6.0).
-          // Auth : LiveKit Cloud (notre setup) → pas besoin de license_key
-          // ai-coustics séparée, c'est le plan-livekit-cloud qui couvre.
-          noiseCancellation: audioEnhancement({
-            model: 'quailVfL',
-            modelParameters: {
-              enhancementLevel: cfg.noiseReductionLevel / 10,
-            },
-            vadSettings: {
-              speechHoldDuration: 0.03,
-              sensitivity: 6.0,
-              minimumSpeechDuration: 0.0,
-            },
-          }),
-        },
-      });
+      try {
+        await session.start({
+          agent,
+          room: ctx.room,
+          inputOptions: {
+            // ai-coustics Quail Voice Focus 2.1 L — UNIQUE étage de
+            // noise reduction côté tel (OpenAI near_field désactivé
+            // plus haut pour éviter double pass redondant).
+            //   - enhancementLevel dérivé du slider 1-10 (cf. /dashboard
+            //     "Réduction de bruit") : 1 ≈ 0.1 (quasi-passthrough),
+            //     8 ≈ 0.8 (équilibré, recommandé téléphonie), 10 = 1.0
+            //     (agressif, peut couper la queue de phonèmes).
+            //   - VAD inhérent au modèle, tuné pour réponse rapide
+            //     (speechHoldDuration 30ms, sensitivity 6.0).
+            // Auth : LiveKit Cloud (notre setup) → pas besoin de license_key
+            // ai-coustics séparée, c'est le plan-livekit-cloud qui couvre.
+            noiseCancellation: audioEnhancement({
+              model: 'quailVfL',
+              modelParameters: {
+                enhancementLevel: cfg.noiseReductionLevel / 10,
+              },
+              vadSettings: {
+                speechHoldDuration: 0.03,
+                sensitivity: 6.0,
+                minimumSpeechDuration: 0.0,
+              },
+            }),
+          },
+        });
+      } catch (e) {
+        // session.start() a échoué (WS OpenAI refusée, room déjà fermée,
+        // modèle inexistant, etc.) — sans fermeture explicite, la room
+        // LiveKit resterait ouverte et l'appelant entendrait du silence
+        // pendant que Twilio facture. closeSession est idempotent (guard
+        // `closing`) → safe ici même si la session n'a jamais émis d'event.
+        void remoteLog(
+          'agent',
+          'session_start_failed',
+          `session.start() a échoué : ${(e as Error)?.message ?? String(e)}`,
+          'error',
+          {},
+        );
+        await closeSession('start_failed');
+        throw e;
+      }
 
       // NB : on n'envoie PLUS de session.update temperature ici. OpenAI
       // Realtime GA a retiré le param (`Unknown parameter: 'session.temperature'`)
@@ -1145,8 +1144,8 @@ Quand la cliente dit "demain", "lundi prochain", "dans 2 semaines", etc. → cal
 
       // Mark the moment the session is ready — anything after this until the
       // first 'speaking' transition is the greeting latency.
-      sessionStartedAtMs = Date.now();
-      tSessionStarted = sessionStartedAtMs;
+      sessionReadyAtMs = Date.now();
+      tSessionStarted = sessionReadyAtMs;
       await sessionClosed;
     } finally {
       clearInterval(silenceWatcher);
