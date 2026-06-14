@@ -10,24 +10,23 @@
 
 import { AudioFrame } from '@livekit/rtc-node';
 
+import { webGet } from './web-api.js';
+
 export type OpenerAudio = { pcm: Buffer; sampleRate: number; text: string };
 
 /**
  * Fetch l'opener pré-généré. Renvoie null si 204 / erreur / timeout (le worker
  * retombe alors sur l'accueil modèle). Timeout court : ne jamais retarder l'appel.
+ * APP_URL + x-internal-secret gérés par `webGet` (cf. src/web-api.ts).
  */
 export async function fetchOpenerPcm(
   phone: string,
-  internalSecret: string,
-  baseUrl: string,
   timeoutMs = 600,
 ): Promise<OpenerAudio | null> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(
-      `${baseUrl}/api/agent/greeting-audio?phone=${encodeURIComponent(phone)}`,
-      { headers: { 'x-internal-secret': internalSecret }, signal: ctrl.signal },
+    const res = await webGet(
+      `/api/agent/greeting-audio?phone=${encodeURIComponent(phone)}`,
+      { timeoutMs },
     );
     if (res.status !== 200) return null;
     const buf = Buffer.from(await res.arrayBuffer());
@@ -40,8 +39,6 @@ export async function fetchOpenerPcm(
     return { pcm: buf, sampleRate, text };
   } catch {
     return null;
-  } finally {
-    clearTimeout(t);
   }
 }
 

@@ -18,6 +18,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { REMOTE_LOG_TIMEOUT_MS } from './constants.js';
+import { webPost } from './web-api.js';
 
 type LogLevel = 'info' | 'warn' | 'error';
 
@@ -85,20 +86,16 @@ export async function remoteLog(
   // distante est down. Format compact pour lisibilité dans Railway logs.
   console.log(`[${source}:${event}]`, message, finalMetadata);
 
-  const appUrl = process.env['APP_URL'];
-  const secret = process.env['INTERNAL_SECRET'];
-  if (!appUrl || !secret) return;
+  // Guard local : sans APP_URL/INTERNAL_SECRET on skip silencieusement
+  // (le mirror stdout au-dessus suffit) au lieu de laisser webPost throw.
+  if (!process.env['APP_URL'] || !process.env['INTERNAL_SECRET']) return;
 
   try {
-    await fetch(`${appUrl}/api/events`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-internal-secret': secret,
-      },
-      body: JSON.stringify({ source, event, message, level, metadata: finalMetadata }),
-      signal: AbortSignal.timeout(REMOTE_LOG_TIMEOUT_MS),
-    });
+    await webPost(
+      '/api/events',
+      { source, event, message, level, metadata: finalMetadata },
+      { timeoutMs: REMOTE_LOG_TIMEOUT_MS },
+    );
   } catch {
     // Logging distant est best-effort. Failures ne doivent jamais
     // crasher la session. Le mirror stdout au-dessus garantit qu'on

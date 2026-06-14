@@ -15,13 +15,29 @@ ne peut pas extraire proprement sans gros refactor.
 
 | Fichier | Contenu |
 |---------|---------|
-| **`constants.ts`** | Magic numbers du runtime : timings (`SILENCE_HANGUP_MS`, etc.), timeouts fetch, valeurs par défaut. Override via env vars commentés. |
+| **`constants.ts`** | Magic numbers du runtime : timings (`SILENCE_HANGUP_MS`, `MAX_CALL_DURATION_MS`, etc.), timeouts fetch, valeurs par défaut. Override via env vars commentés. |
 | **`env.ts`** | `requireEnv()` / `envOr()` — accès défensif aux variables d'environnement. |
 | **`types.ts`** | `AgentFeatures`, `FetchedConfig`, `TranscriptEntry`, `SessionOrigin`, `ProcessUserData`. Toutes les interfaces partagées. |
-| **`origin.ts`** | `detectOrigin()` + helpers `sipFromOf()`, `sipToOf()`, `webUserIdOf()`. Distingue SIP Twilio vs Web LiveTest depuis les attributes/metadata du participant. |
-| **`config-fetcher.ts`** | `fetchConfig(origin)` — GET `/api/agent/config` avec routing per-origin. `defaultConfig()` + `DEFAULT_FEATURES` en fallback failure-open. |
-| **`remote-log.ts`** | `remoteLog()` — POST `/api/events` best-effort. Mirror stdout pour Railway logs. |
-| **`post-call.ts`** | `postCallEnd()` — POST `/api/calls/end` avec le transcript final. Web service prend le relais (summary, WhatsApp recap, DB persist). |
+| **`origin.ts`** | `detectOrigin()` + helpers `sipFromOf()`, `sipToOf()`, `webUserIdOf()`, `outboundTestOf()`. Distingue SIP Twilio (PSTN/WhatsApp), Web LiveTest, test live d'agent sortant (`outbound_test`) et campagne sortante (`campaign`, via metadata job/participant ou nom de room `campaign__…`). |
+| **`config-fetcher.ts`** | `fetchConfig(origin)` — GET `/api/agent/config` (ou `campaign-config` / `outbound-test-config` selon l'origine). `defaultConfig()` + `DEFAULT_FEATURES` en fallback failure-open. |
+| **`web-api.ts`** | `webGet()` / `webPost()` — client HTTP centralisé worker → app web : `APP_URL`, header `x-internal-secret`, timeout. Renvoie la `Response` brute, chaque call site garde son handling. |
+| **`remote-log.ts`** | `remoteLog()` — POST `/api/events` best-effort. Mirror stdout pour Railway logs. `enterSession()`/`runWithSession()` propagent `origin` via AsyncLocalStorage. |
+| **`post-call.ts`** | `postCallEnd()` (inbound → `/api/calls/end`) et `postCampaignResult()` (campagne → `/api/agent/campaign-result`). Retry/backoff 3 tentatives, dump console du payload en dernier recours. |
+| **`greeting-player.ts`** | `fetchOpenerPcm()` (GET `/api/agent/greeting-audio`, timeout 600 ms, null si indispo) + `pcmToFrameStream()` — accueil pré-généré joué via `session.say`. |
+| **`pricing.ts`** | `computeRealtimeCostUsd()` — coût USD d'un appel depuis le breakdown tokens (audio/texte/cached) au tarif du modèle. |
+| **`region-probe.ts`** | `probeRegionsAtStartup()` — RTT réels vers Twilio/LiveKit/OpenAI/Web au boot, loggé `infra_region_probe`. N'utilise PAS `web-api.ts` (sonde réseau bas niveau). |
+| **`phone.ts`** | `toIsraeliLocal()` — `+972…` → `0…`. Appliqué partout où un numéro E.164 entre dans le flux conversationnel ou les tools. |
+| **`lang-sniff.ts`** | `sniffLang()` — détection cheap hébreu/latin par charset (variante stricte unifiée). Sert au log `[lang_sniff]` et au language-enforcement. |
+| **`transcript.ts`** | `extractText()` — extraction du texte brut depuis les `content[]` des ChatMessages Realtime. |
+| **`per-call-context.ts`** | `buildPerCallContext()` — assemble le system message per-call (date/heure Jérusalem + caller-hint) depuis le template per-plan ou le fallback hardcodé. |
+
+## `tools/` (racine du repo)
+
+| Fichier | Contenu |
+|---------|---------|
+| **`tools/calendar.ts`** | Tools tenant : calendrier (`list_available_dates`, `check_availability`, `book_appointment`, `find_appointment`, `cancel_appointment`, `reschedule_appointment`) + CRM (`save_contact`, auto-save dans book). POST `/api/calendar/*` et `/api/sheets/contact` via `webPost` avec routing tenant `x-tenant-phone` / `x-tenant-user-id`. Gating par `features` du plan. |
+| **`tools/business.ts`** | 5 tools structurés depuis `agent_configs.business` : `list_centres`, `get_centre_info`, `get_opening_hours`, `list_services`, `find_service`. |
+| **`tools/knowledge.ts`** | Tools legacy `knowledge` (un par entrée) — fallback pour les tenants pas encore migrés vers `business`. À droper en release N+1. |
 
 ## Convention d'imports
 

@@ -7,14 +7,55 @@
  *   3. Envoie un WhatsApp owner (recap proprio) si owner_whatsapp set
  *   4. Persiste l'appel en DB pour audit + dashboard logs
  *
- * Best-effort : la fonction ne throw JAMAIS. Si le POST échoue (network,
- * 500 côté web, etc.), on log l'erreur localement et on continue. Une
- * échec ici ne doit pas crasher l'agent qui est peut-être encore en
- * traitement d'autres calls parallèles.
+ * Best-effort : la fonction ne throw JAMAIS. Mais contrairement à la
+ * télémétrie, un échec ici = PERTE DE DONNÉES (le transcript n'existe
+ * nulle part ailleurs). Donc :
+ *   - retry avec backoff (3 tentatives : immédiat, +1s, +4s)
+ *   - en dernier recours, le payload COMPLET est dumpé en console.error
+ *     pour recovery manuelle depuis les logs Railway.
  */
 
 import { POST_CALL_TIMEOUT_MS } from './constants.js';
 import type { CallChannel, TranscriptEntry } from './types.js';
+import { webPost } from './web-api.js';
+
+/** Délais avant chaque tentative : immédiat, +1s, +4s. */
+const RETRY_DELAYS_MS = [0, 1_000, 4_000];
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * POST avec retry/backoff vers l'app web. Retente quand le fetch throw
+ * (réseau, timeout) OU quand le web répond 5xx (erreur transitoire). Un
+ * 4xx n'est PAS retenté (payload invalide — rejouer ne changera rien).
+ *
+ * @returns la Response finale (status < 500), ou null si les 3 tentatives
+ *          ont échoué. Ne throw jamais.
+ */
+async function fetchWithRetry(
+  label: string,
+  path: string,
+  payload: unknown,
+): Promise<Response | null> {
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+    const delay = RETRY_DELAYS_MS[attempt] ?? 0;
+    if (delay > 0) await sleep(delay);
+    try {
+      const res = await webPost(path, payload, {
+        timeoutMs: POST_CALL_TIMEOUT_MS,
+      });
+      if (res.status < 500) return res;
+      console.warn(
+        `${label} ${path} → HTTP ${res.status} (tentative ${attempt + 1}/${RETRY_DELAYS_MS.length})`,
+      );
+    } catch (e) {
+      console.warn(
+        `${label} ${path} failed (tentative ${attempt + 1}/${RETRY_DELAYS_MS.length}): ${(e as Error).message}`,
+      );
+    }
+  }
+  return null;
+}
 
 /**
  * POST le résultat d'un appel de campagne SORTANTE à
@@ -40,27 +81,27 @@ export async function postCampaignResult(
     return;
   }
   const outcome = transcript.length > 0 ? 'connected' : 'no_answer';
-  try {
-    const res = await fetch(`${appUrl}/api/agent/campaign-result`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-internal-secret': secret,
-      },
-      body: JSON.stringify({
-        campaignId,
-        contactId,
-        outcome,
-        transcript,
-        durationSeconds,
-      }),
-      signal: AbortSignal.timeout(POST_CALL_TIMEOUT_MS),
-    });
-    const body = await res.text();
-    console.log(`[campaign] /api/agent/campaign-result → ${res.status} ${body.slice(0, 160)}`);
-  } catch (e) {
-    console.error(`[campaign] result failed: ${(e as Error).message}`);
+  const payload = {
+    campaignId,
+    contactId,
+    outcome,
+    transcript,
+    durationSeconds,
+  };
+  const res = await fetchWithRetry(
+    '[campaign]',
+    '/api/agent/campaign-result',
+    payload,
+  );
+  if (!res) {
+    console.error(
+      '[post-call] PERTE DE DONNÉES — payload pour recovery manuelle:',
+      JSON.stringify(payload),
+    );
+    return;
   }
+  const body = await res.text().catch(() => '');
+  console.log(`[campaign] /api/agent/campaign-result → ${res.status} ${body.slice(0, 160)}`);
 }
 
 /**
@@ -98,30 +139,26 @@ export async function postCallEnd(
     return;
   }
 
-  try {
-    const res = await fetch(`${appUrl}/api/calls/end`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-internal-secret': secret,
-      },
-      body: JSON.stringify({
-        fromNumber,
-        toNumber,
-        transcript,
-        // Omettre `userId` si undefined plutôt qu'envoyer null —
-        // /api/calls/end fait son routing tenant en cascade.
-        ...(userId ? { userId } : {}),
-        // Canal SIP : conditionne le mode d'envoi du recap client côté web.
-        ...(channel ? { channel } : {}),
-      }),
-      signal: AbortSignal.timeout(POST_CALL_TIMEOUT_MS),
-    });
-    const body = await res.text();
-    console.log(
-      `[recap] /api/calls/end → ${res.status} ${body.slice(0, 200)}`,
+  const payload = {
+    fromNumber,
+    toNumber,
+    transcript,
+    // Omettre `userId` si undefined plutôt qu'envoyer null —
+    // /api/calls/end fait son routing tenant en cascade.
+    ...(userId ? { userId } : {}),
+    // Canal SIP : conditionne le mode d'envoi du recap client côté web.
+    ...(channel ? { channel } : {}),
+  };
+  const res = await fetchWithRetry('[recap]', '/api/calls/end', payload);
+  if (!res) {
+    console.error(
+      '[post-call] PERTE DE DONNÉES — payload pour recovery manuelle:',
+      JSON.stringify(payload),
     );
-  } catch (e) {
-    console.error(`[recap] failed: ${(e as Error).message}`);
+    return;
   }
+  const body = await res.text().catch(() => '');
+  console.log(
+    `[recap] /api/calls/end → ${res.status} ${body.slice(0, 200)}`,
+  );
 }

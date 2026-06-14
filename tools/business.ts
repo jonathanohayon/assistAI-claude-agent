@@ -17,33 +17,16 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+import type { BusinessConfig, BusinessWeekDay } from '../src/types.js';
+
 type Tool = llm.Tool;
 
-type WeekDay = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
-type DayHours = { open: boolean; openTime: string; closeTime: string };
-
-interface BusinessCentre {
-  id: string;
-  name: string;
-  address: string;
-  hours: Record<WeekDay, DayHours>;
-}
-
-interface BusinessService {
-  id: string;
-  name: string;
-  durationMinutes: number;
-  priceILS: number;
-  centreIds: string[] | 'all';
-  description: string;
-}
-
-export interface BusinessConfig {
-  identity: { name: string; tagline: string; email: string };
-  centres: BusinessCentre[];
-  services: BusinessService[];
-  centresRules?: string;
-}
+// Types dérivés de la source de vérité `src/types.ts` (D3 : les interfaces
+// locales dupliquées ont été supprimées — knowledge.ts importait déjà
+// ses types depuis src/types.ts).
+type WeekDay = BusinessWeekDay;
+type BusinessCentre = BusinessConfig['centres'][number];
+type BusinessService = BusinessConfig['services'][number];
 
 const DAY_LABELS_FR: Record<WeekDay, string> = {
   sun: 'dimanche',
@@ -92,11 +75,12 @@ const findCentre = (
   const exact = business.centres.find((c) => c.id === centreId);
   if (exact) return exact;
   // Fallback : match insensible par nom (le LLM peut passer "Jerusalem"
-  // au lieu de l'id `ctr_xyz`). Best-effort.
+  // au lieu de l'id `ctr_xyz`). Best-effort. `c.name ?? ''` : lecture
+  // défensive sur payload partiel (C3).
   const lower = centreId.toLowerCase().trim();
   return (
-    business.centres.find((c) => c.name.toLowerCase() === lower) ??
-    business.centres.find((c) => c.name.toLowerCase().includes(lower)) ??
+    business.centres.find((c) => (c.name ?? '').toLowerCase() === lower) ??
+    business.centres.find((c) => (c.name ?? '').toLowerCase().includes(lower)) ??
     null
   );
 };
@@ -116,19 +100,30 @@ const servicesForCentre = (
 };
 
 const formatService = (s: BusinessService, business: BusinessConfig): string => {
+  // C3 : `Array.isArray` — centreIds peut manquer dans un payload partiel.
   const where =
     s.centreIds === 'all'
       ? 'tous les centres'
-      : s.centreIds
+      : (Array.isArray(s.centreIds) ? s.centreIds : [])
           .map((id) => business.centres.find((c) => c.id === id)?.name ?? id)
           .join(', ') || '(aucun centre)';
   return `${s.name} — ${s.durationMinutes} min, ${s.priceILS} ₪ (dispo à ${where})${s.description ? ` — ${s.description}` : ''}`;
 };
 
 export function makeBusinessTools(
-  business?: BusinessConfig,
+  rawBusiness?: BusinessConfig,
 ): Record<string, Tool> {
-  if (!business) return {};
+  if (!rawBusiness) return {};
+  // C3 : lectures défensives — /api/agent/config peut renvoyer un payload
+  // partiel (migration en cours, ancien deploy web, champ jsonb incomplet).
+  // On normalise UNE fois ici pour qu'aucun accès propriété ne puisse
+  // throw à l'intérieur de entry().
+  const business: BusinessConfig = {
+    ...rawBusiness,
+    identity: rawBusiness.identity ?? { name: '', tagline: '', email: '' },
+    centres: rawBusiness.centres ?? [],
+    services: rawBusiness.services ?? [],
+  };
   const hasCentres = business.centres.length > 0;
   const hasServices = business.services.length > 0;
   if (!hasCentres && !hasServices) return {};
@@ -243,10 +238,11 @@ export function makeBusinessTools(
         const pool = servicesForCentre(business, centreId);
         const q = query.toLowerCase().trim();
         if (!q) return 'Query vide — précise un mot-clé.';
+        // C3 : `?? ''` — name/description peuvent manquer (payload partiel).
         const matches = pool.filter(
           (s) =>
-            s.name.toLowerCase().includes(q) ||
-            s.description.toLowerCase().includes(q),
+            (s.name ?? '').toLowerCase().includes(q) ||
+            (s.description ?? '').toLowerCase().includes(q),
         );
         if (matches.length === 0) {
           return `Aucun soin ne matche "${query}"${centreId ? ` au centre ${centreId}` : ''}. Appelle list_services pour voir tout le catalogue.`;
