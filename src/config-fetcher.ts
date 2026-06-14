@@ -130,6 +130,8 @@ export async function fetchConfig(
       // Si le web n'a pas (encore) déployé le champ features, on ouvre
       // tout par défaut (mode legacy = plan premium implicite).
       features: data.features ?? DEFAULT_FEATURES,
+      // Prise de commandes : opt-in, false si absent (ancien deploy web).
+      ordersEnabled: data.ordersEnabled === true,
       // exactOptionalPropertyTypes refuse 'undefined' explicite ; on
       // omet la clé si vide pour ne pas planter le typing.
       ...(data.perCallContextTemplate !== undefined

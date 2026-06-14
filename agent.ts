@@ -60,6 +60,7 @@ import type {
 import { makeBusinessTools } from './tools/business.js';
 import { makeCalendarTools } from './tools/calendar.js';
 import { makeKnowledgeTools } from './tools/knowledge.js';
+import { makeOrdersTools } from './tools/orders.js';
 
 export default defineAgent<ProcessUserData>({
   // Silero VAD désactivé : en Realtime mode, OpenAI gère server_vad pour
@@ -968,6 +969,18 @@ export default defineAgent<ProcessUserData>({
       },
     });
 
+    // Tool de prise de commandes — enregistré UNIQUEMENT si le tenant a activé
+    // le toggle "Commandes" (cfg.ordersEnabled). Sinon le modèle ne voit pas
+    // le tool et ne peut pas l'halluciner (cf. même logique que calendar/crm).
+    const ordersTools = cfg.ordersEnabled
+      ? makeOrdersTools({
+          dialedPhone: toNumber,
+          getDialedPhone: () => toNumber,
+          tenantUserId,
+          getCallerPhone: () => toIsraeliLocal(fromNumber),
+        })
+      : {};
+
     // Numéro de l'appelant en format local israélien (+972… → 0…) — les
     // clientes dictent/écoutent en local, les tools stockent en local.
     const localFromNumber = toIsraeliLocal(fromNumber);
@@ -1052,6 +1065,7 @@ export default defineAgent<ProcessUserData>({
                 'reschedule_appointment',
               ]
             : []),
+          ...(cfg.ordersEnabled ? ['record_order'] : []),
           ...businessNames,
           ...knowledgeNames,
           'end_call',
@@ -1073,6 +1087,7 @@ export default defineAgent<ProcessUserData>({
       chatCtx: initialChatCtx,
       tools: {
         ...calendarTools,
+        ...ordersTools,
         ...businessTools,
         ...knowledgeTools,
         end_call: endCallTool,

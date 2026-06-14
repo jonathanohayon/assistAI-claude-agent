@@ -59,6 +59,12 @@ export interface FetchedConfig {
   /** Features actives pour ce plan. */
   features: AgentFeatures;
   /**
+   * Prise de commandes au téléphone activée (toggle "Commandes" de la tuile
+   * CRM). Quand vrai, le worker enregistre le tool `record_order`. Défaut
+   * false (opt-in). Absent du payload web ancien → traité comme false.
+   */
+  ordersEnabled?: boolean;
+  /**
    * Slider 1-10 piloté depuis `/dashboard`. Mappé vers `enhancementLevel`
    * 0.1-1.0 du QVF 2.1 L à la création de la session.
    */
