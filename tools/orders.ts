@@ -23,7 +23,7 @@ export interface OrdersToolContext {
 export const makeOrdersTools = (ctx: OrdersToolContext) => {
   const recordOrder = llm.tool({
     description:
-      "Enregistre une commande ou une réservation que le client passe au téléphone (produit/service, quantité, détails). À appeler dès que le client confirme ce qu'il veut commander/réserver. NE DEMANDE JAMAIS le nom ni le téléphone du client : le numéro de l'appelant est déjà connu et rempli automatiquement. Seul l'article est requis, le reste est optionnel — n'invente rien.",
+      "Enregistre une commande ou une réservation que le client passe au téléphone (produit/service, quantité, détails). À appeler dès que le client confirme ce qu'il veut commander/réserver. Le numéro de l'appelant est rempli automatiquement ; le nom et les autres champs sont optionnels — n'invente rien, ne renseigne que ce que le client a réellement dit. Suis ta persona pour savoir quelles infos demander (ex. le nom).",
     parameters: z.object({
       item: z.string().describe('Produit ou service commandé/réservé.'),
       quantity: z
