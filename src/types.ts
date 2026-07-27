@@ -59,6 +59,12 @@ export interface FetchedConfig {
   /** Features actives pour ce plan. */
   features: AgentFeatures;
   /**
+   * Mode BYO-agent : si présent, le cerveau vit chez le client. Le modèle
+   * Realtime ne fait plus qu'écouter et parler, et chaque tour part vers ce
+   * endpoint. Absent = comportement historique (le modèle répond lui-même).
+   */
+  agentWebhook?: { url: string; secret?: string };
+  /**
    * Prise de commandes au téléphone activée (toggle "Commandes" de la tuile
    * CRM). Quand vrai, le worker enregistre le tool `record_order`. Défaut
    * false (opt-in). Absent du payload web ancien → traité comme false.

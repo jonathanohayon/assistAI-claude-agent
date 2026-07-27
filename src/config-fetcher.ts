@@ -132,6 +132,13 @@ export async function fetchConfig(
       features: data.features ?? DEFAULT_FEATURES,
       // Prise de commandes : opt-in, false si absent (ancien deploy web).
       ordersEnabled: data.ordersEnabled === true,
+      // BYO-agent : uniquement si le web renvoie une URL exploitable. Une
+      // valeur douteuse doit laisser le tenant en mode persona plutôt que
+      // de router les tours vers le vide.
+      ...(typeof data.agentWebhook?.url === 'string' &&
+      data.agentWebhook.url.startsWith('http')
+        ? { agentWebhook: data.agentWebhook }
+        : {}),
       // exactOptionalPropertyTypes refuse 'undefined' explicite ; on
       // omet la clé si vide pour ne pas planter le typing.
       ...(data.perCallContextTemplate !== undefined

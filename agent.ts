@@ -34,6 +34,11 @@ import {
   AGENT_NAME,
   REALTIME_CONFIG,
 } from './config.js';
+import {
+  callAgentWebhook,
+  stallLine,
+  type WebhookTurn,
+} from './src/agent-webhook.js';
 import { fetchConfig } from './src/config-fetcher.js';
 import {
   END_CALL_HARD_CAP_MS,
@@ -166,6 +171,16 @@ export default defineAgent<ProcessUserData>({
     );
 
     const cfg = await fetchConfig(origin);
+
+    // ── Mode BYO-agent ──────────────────────────────────────────────────
+    // Quand le tenant a branché son propre agent, le modèle Realtime cesse
+    // d'être le cerveau : il transcrit et il parle, et chaque tour part vers
+    // le endpoint du client. Absent → comportement historique intact.
+    const agentWebhook = cfg.agentWebhook;
+    const webhookMode = Boolean(agentWebhook?.url);
+    if (webhookMode) {
+      console.log(`[webhook_agent] mode actif → ${agentWebhook!.url}`);
+    }
     tConfigFetched = Date.now();
     // fire-and-forget : ne jamais bloquer le chemin d'appel sur la télémétrie
     void remoteLog(
@@ -348,7 +363,11 @@ export default defineAgent<ProcessUserData>({
         threshold: 0.75,
         prefix_padding_ms: 150,
         silence_duration_ms: 350,
-        create_response: true,
+        // En mode BYO-agent, laisser `create_response` à true ferait parler
+        // DEUX cerveaux : le modèle répondrait de lui-même pendant qu'on
+        // attend le endpoint du client. Le modèle devient oreille + voix,
+        // rien de plus.
+        create_response: !webhookMode,
       },
     });
 
@@ -360,6 +379,9 @@ export default defineAgent<ProcessUserData>({
 
     // ── Transcript capture ──────────────────────────────────────────────
     const transcript: TranscriptEntry[] = [];
+    // État du mode BYO-agent : un tour à la fois, numérotés pour les logs.
+    let webhookTurnInFlight = false;
+    let webhookTurnId = 0;
     let fromNumber = '';
     let toNumber = origin.kind === 'sip' ? origin.calledNumber : '';
     let recapSent = false;
@@ -443,6 +465,81 @@ export default defineAgent<ProcessUserData>({
       console.log(
         `[lang_sniff] user turn: ${langSniff} | "${text.slice(0, 60)}"`,
       );
+
+      // ── BYO-agent : le tour part chez le client ───────────────────────
+      // Volontairement pas un tool Realtime : le SDK laisse tomber un tool
+      // call quand le modèle y mêle de l'audio de remplissage. On appelle
+      // hors du flux vocal, puis on fait prononcer la réponse.
+      if (!webhookMode || !agentWebhook) return;
+      if (webhookTurnInFlight) {
+        // L'appelant a enchaîné avant qu'on ait répondu. On ignore le tour
+        // précédent plutôt que d'empiler deux réponses qui se parleraient
+        // dessus.
+        console.warn('[webhook_agent] tour ignoré : requête déjà en vol');
+        return;
+      }
+      webhookTurnInFlight = true;
+      webhookTurnId += 1;
+      const turnId = webhookTurnId;
+
+      void (async () => {
+        // Filet anti-silence : si le client dépasse ~700 ms, on meuble. Un
+        // blanc au téléphone est indistinguable d'une ligne coupée.
+        const stallTimer = setTimeout(() => {
+          try {
+            session.say(stallLine(cfg.primaryLanguage ?? 'fr'), {
+              addToChatCtx: false,
+            });
+          } catch {
+            /* jamais bloquant */
+          }
+        }, 700);
+
+        try {
+          const history: WebhookTurn[] = transcript.map((entry) => ({
+            role: entry.role === 'assistant' ? 'agent' : 'user',
+            text: entry.text,
+          }));
+
+          const result = await callAgentWebhook(agentWebhook, {
+            callId: ctx.room.name ?? 'call',
+            turnId,
+            language: cfg.primaryLanguage ?? 'fr',
+            transcript: text,
+            history,
+          });
+          clearTimeout(stallTimer);
+
+          console.log(
+            `[webhook_agent] turn ${turnId} → ${result.reply ? 'ok' : result.failure} in ${result.elapsedMs}ms`,
+          );
+
+          if (result.reply) {
+            // addToChatCtx : le modèle doit savoir ce qui a été dit en son
+            // nom, sinon il repart de zéro au tour suivant.
+            session.say(result.reply, { addToChatCtx: true });
+            return;
+          }
+
+          void remoteLog(
+            'agent',
+            'webhook_agent_turn_failed',
+            `Agent client injoignable ou hors contrat (${result.failure}, ${result.elapsedMs}ms)`,
+            'warn',
+            { turnId, failure: result.failure, status: result.status },
+          );
+          session.say(stallLine(cfg.primaryLanguage ?? 'fr'), {
+            addToChatCtx: false,
+          });
+        } catch (err) {
+          clearTimeout(stallTimer);
+          console.warn(
+            `[webhook_agent] tour ${turnId} en erreur : ${(err as Error).message}`,
+          );
+        } finally {
+          webhookTurnInFlight = false;
+        }
+      })();
     });
 
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
@@ -592,7 +689,7 @@ export default defineAgent<ProcessUserData>({
     let greetingMs: number | null = null;
     // 'prerendered' = accueil joué via session.say (audio pré-généré), 'model'
     // = accueil généré par le LLM (fallback). Loggé dans call_metrics.
-    let greetingSource: 'prerendered' | 'model' = 'model';
+    let greetingSource: 'prerendered' | 'model' | 'webhook' = 'model';
     let lastUserDoneAtMs: number | null = null;
     const wallclockTurnLatenciesMs: number[] = [];
 
@@ -878,6 +975,35 @@ export default defineAgent<ProcessUserData>({
             // → on retombe sur l'accueil modèle ci-dessous.
           } finally {
             this.session.input.setAudioEnabled(true);
+          }
+        }
+
+        // ── BYO-agent : c'est l'agent du client qui ouvre ─────────────────
+        // Laisser le modèle improviser l'accueil avec la persona du tenant
+        // dirait au client des choses que son agent n'a jamais écrites. On
+        // demande le tour 0 au endpoint, et on ne retombe sur le modèle que
+        // s'il ne répond pas.
+        if (webhookMode && agentWebhook) {
+          const opening = await callAgentWebhook(agentWebhook, {
+            callId: ctx.room.name ?? 'call',
+            turnId: 0,
+            language: cfg.primaryLanguage ?? 'fr',
+            transcript: '',
+            history: [],
+          });
+          console.log(
+            `[webhook_agent] accueil → ${opening.reply ? 'ok' : opening.failure} in ${opening.elapsedMs}ms`,
+          );
+          if (opening.reply) {
+            const handle = this.session.say(opening.reply, {
+              addToChatCtx: true,
+            });
+            await Promise.race([
+              handle.waitForPlayout(),
+              new Promise((r) => setTimeout(r, 15000)),
+            ]);
+            greetingSource = 'webhook';
+            return;
           }
         }
 
