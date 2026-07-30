@@ -26,6 +26,7 @@ import type {
   FetchedConfig,
   SessionOrigin,
 } from './types.js';
+import { fetchVoxConfigByPhone, voxInstructions } from './vox-config.js';
 import { webGet } from './web-api.js';
 
 /**
@@ -76,6 +77,44 @@ export function defaultConfig(): FetchedConfig {
 export async function fetchConfig(
   origin: SessionOrigin,
 ): Promise<FetchedConfig> {
+  // ── Tamara d'abord, pour les numéros qui lui appartiennent ───────────
+  // La voix se règle désormais côté Tamara : un agent est un cerveau texte et
+  // arrive sans voix. On interroge donc Tamara AVANT le tenant, et on ne
+  // retombe sur le chemin historique que si le numéro lui est inconnu — ce
+  // qui reste le cas de la majorité des appels.
+  if (origin.kind === 'sip') {
+    const vox = await fetchVoxConfigByPhone(origin.calledNumber);
+    if (vox) {
+      console.log(
+        `[config] agent Tamara « ${vox.name} » (${vox.id}) pour ${origin.calledNumber}`,
+      );
+      return {
+        // Le modèle ne porte plus de persona : il prononce ce que le webhook
+        // renvoie, avec la diction demandée.
+        instructions: voxInstructions(vox),
+        greetingInstructions: '',
+        agentName: vox.name,
+        model: REALTIME_CONFIG.model,
+        voice: vox.voice,
+        temperature: REALTIME_CONFIG.temperature,
+        speed: vox.speed,
+        maxResponseTokens: 220,
+        noiseReductionLevel: DEFAULT_NOISE_REDUCTION_LEVEL,
+        greetingFallbackTemplate: '',
+        // Un agent Tamara n'utilise aucun tool du tenant : son cerveau est
+        // ailleurs et ne connaît ni notre agenda ni notre CRM.
+        features: {
+          calendar: false,
+          crm: false,
+          whatsapp_confirm: false,
+          whatsapp_recap: false,
+        },
+        primaryLanguage: vox.primaryLanguage,
+        agentWebhook: vox.agentWebhook,
+      };
+    }
+  }
+
   if (!process.env['APP_URL']) {
     console.warn('[config] APP_URL not set, using compiled defaults');
     return defaultConfig();
