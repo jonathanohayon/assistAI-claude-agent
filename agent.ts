@@ -39,6 +39,7 @@ import {
   stallLine,
   type WebhookTurn,
 } from './src/agent-webhook.js';
+import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
 import {
   END_CALL_HARD_CAP_MS,
@@ -515,6 +516,19 @@ export default defineAgent<ProcessUserData>({
           console.log(
             `[webhook_agent] turn ${turnId} → ${result.reply ? 'ok' : result.failure} in ${result.elapsedMs}ms`,
           );
+
+          reportTurn({
+            agentId: cfg.voxAgentId ?? '',
+            callId: ctx.room.name ?? 'call',
+            turnId,
+            elapsedMs: result.elapsedMs,
+            ok: Boolean(result.reply),
+            ...(result.failure ? { failure: result.failure } : {}),
+            ...(result.status ? { status: result.status } : {}),
+            language: cfg.primaryLanguage ?? 'fr',
+            transcript: text,
+            ...(result.reply ? { reply: result.reply } : {}),
+          });
 
           if (result.reply) {
             // On NE peut PAS utiliser session.say() ici : en Realtime, l'audio

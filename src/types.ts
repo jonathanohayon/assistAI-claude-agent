@@ -64,6 +64,8 @@ export interface FetchedConfig {
    * endpoint. Absent = comportement historique (le modèle répond lui-même).
    */
   agentWebhook?: { url: string; secret?: string };
+  /** Identifiant de l'agent Tamara, pour rattacher les tours au monitoring. */
+  voxAgentId?: string;
   /**
    * Prise de commandes au téléphone activée (toggle "Commandes" de la tuile
    * CRM). Quand vrai, le worker enregistre le tool `record_order`. Défaut

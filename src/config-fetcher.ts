@@ -111,6 +111,7 @@ export async function fetchConfig(
         },
         primaryLanguage: vox.primaryLanguage,
         agentWebhook: vox.agentWebhook,
+        voxAgentId: vox.id,
       };
     }
   }

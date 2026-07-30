@@ -116,3 +116,37 @@ export function voxInstructions(cfg: VoxAgentConfig): string {
     .filter((l) => l !== null)
     .join('\n');
 }
+
+/**
+ * Rapporte un tour de parole à Tamara, pour le monitoring.
+ *
+ * Fire-and-forget et silencieux : journaliser ne doit jamais peser sur un
+ * appel en cours, ni le faire échouer si Tamara est indisponible.
+ */
+export function reportTurn(payload: {
+  agentId: string;
+  callId: string;
+  turnId: number;
+  elapsedMs: number;
+  ok: boolean;
+  failure?: string;
+  status?: number;
+  language?: string;
+  transcript?: string;
+  reply?: string;
+}): void {
+  const base = process.env['TAMARAVOX_URL'];
+  const secret = process.env['TAMARAVOX_WORKER_SECRET'];
+  if (!base || !secret || !payload.agentId) return;
+
+  void fetch(`${base.replace(/\/$/, '')}/api/v1/turns`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-worker-secret': secret,
+    },
+    body: JSON.stringify(payload),
+  }).catch(() => {
+    /* le monitoring ne casse jamais un appel */
+  });
+}
