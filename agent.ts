@@ -487,8 +487,10 @@ export default defineAgent<ProcessUserData>({
         // blanc au téléphone est indistinguable d'une ligne coupée.
         const stallTimer = setTimeout(() => {
           try {
-            session.say(stallLine(cfg.primaryLanguage ?? 'fr'), {
-              addToChatCtx: false,
+            // generateReply renvoie un SpeechHandle, pas une promesse : on ne
+            // l'attend pas, la phrase d'attente doit partir sans bloquer.
+            session.generateReply({
+              instructions: `Dis EXACTEMENT ceci, mot pour mot : ${stallLine(cfg.primaryLanguage ?? 'fr')}`,
             });
           } catch {
             /* jamais bloquant */
@@ -515,9 +517,15 @@ export default defineAgent<ProcessUserData>({
           );
 
           if (result.reply) {
-            // addToChatCtx : le modèle doit savoir ce qui a été dit en son
-            // nom, sinon il repart de zéro au tour suivant.
-            session.say(result.reply, { addToChatCtx: true });
+            // On NE peut PAS utiliser session.say() ici : en Realtime, l'audio
+            // est produit par le modèle lui-même et la session n'embarque
+            // aucun TTS séparé — say() échoue avec « trying to generate
+            // speech from text without a TTS model ». On demande donc au
+            // modèle de prononcer exactement ce texte : c'est lui qui tient
+            // le chemin audio.
+            await session.generateReply({
+              instructions: `Dis EXACTEMENT ceci, mot pour mot, sans rien ajouter ni reformuler :\n\n${result.reply}`,
+            });
             return;
           }
 
@@ -528,8 +536,8 @@ export default defineAgent<ProcessUserData>({
             'warn',
             { turnId, failure: result.failure, status: result.status },
           );
-          session.say(stallLine(cfg.primaryLanguage ?? 'fr'), {
-            addToChatCtx: false,
+          await session.generateReply({
+            instructions: `Dis EXACTEMENT ceci, mot pour mot : ${stallLine(cfg.primaryLanguage ?? 'fr')}`,
           });
         } catch (err) {
           clearTimeout(stallTimer);
@@ -995,13 +1003,9 @@ export default defineAgent<ProcessUserData>({
             `[webhook_agent] accueil → ${opening.reply ? 'ok' : opening.failure} in ${opening.elapsedMs}ms`,
           );
           if (opening.reply) {
-            const handle = this.session.say(opening.reply, {
-              addToChatCtx: true,
+            await this.session.generateReply({
+              instructions: `Dis EXACTEMENT ceci, mot pour mot, sans rien ajouter : ${opening.reply}`,
             });
-            await Promise.race([
-              handle.waitForPlayout(),
-              new Promise((r) => setTimeout(r, 15000)),
-            ]);
             greetingSource = 'webhook';
             return;
           }
