@@ -39,6 +39,7 @@ import {
   stallLine,
   type WebhookTurn,
 } from './src/agent-webhook.js';
+import { getTtsEngine } from './src/tts/index.js';
 import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
 import {
@@ -383,6 +384,43 @@ export default defineAgent<ProcessUserData>({
     // État du mode BYO-agent : un tour à la fois, numérotés pour les logs.
     let webhookTurnInFlight = false;
     let webhookTurnId = 0;
+
+    /**
+     * Prononce un texte **mot pour mot**.
+     *
+     * En BYO, les mots appartiennent au client : les faire passer par le
+     * modèle (« dis exactement ceci ») le laisse libre de reformuler, et les
+     * reformulations tombent là où c'est inacceptable — prix, numéros,
+     * mentions légales. Un TTS n'a pas cette latitude.
+     *
+     * Repli sur le modèle si aucun moteur n'est configuré : un agent qui
+     * paraphrase reste préférable à un agent muet.
+     */
+    const speakVerbatim = async (text: string): Promise<void> => {
+      const tts = getTtsEngine();
+      if (tts) {
+        try {
+          const audio = await tts.speak(text, {
+            voice: cfg.voice,
+            language: cfg.primaryLanguage ?? 'fr',
+            ...(cfg.speed ? { speed: cfg.speed } : {}),
+          });
+          // addToChatCtx : le modèle doit savoir ce qui a été dit en son nom,
+          // sinon il repart de zéro au tour suivant.
+          const handle = session.say(text, { audio, addToChatCtx: true });
+          await Promise.race([
+            handle.waitForPlayout(),
+            new Promise((r) => setTimeout(r, 30_000)),
+          ]);
+          return;
+        } catch (err) {
+          console.warn(`[tts] ${(err as Error).message} — repli sur le modèle`);
+        }
+      }
+      await session.generateReply({
+        instructions: `Dis EXACTEMENT ceci, mot pour mot, sans rien ajouter ni reformuler :\n\n${text}`,
+      });
+    };
     let fromNumber = '';
     let toNumber = origin.kind === 'sip' ? origin.calledNumber : '';
     let recapSent = false;
@@ -487,15 +525,12 @@ export default defineAgent<ProcessUserData>({
         // Filet anti-silence : si le client dépasse ~700 ms, on meuble. Un
         // blanc au téléphone est indistinguable d'une ligne coupée.
         const stallTimer = setTimeout(() => {
-          try {
-            // generateReply renvoie un SpeechHandle, pas une promesse : on ne
-            // l'attend pas, la phrase d'attente doit partir sans bloquer.
-            session.generateReply({
-              instructions: `Dis EXACTEMENT ceci, mot pour mot : ${stallLine(cfg.primaryLanguage ?? 'fr')}`,
-            });
-          } catch {
-            /* jamais bloquant */
-          }
+          // La phrase d'attente ne doit jamais bloquer : on ne l'attend pas.
+          void speakVerbatim(stallLine(cfg.primaryLanguage ?? 'fr')).catch(
+            () => {
+              /* jamais bloquant */
+            },
+          );
         }, 700);
 
         try {
@@ -531,15 +566,7 @@ export default defineAgent<ProcessUserData>({
           });
 
           if (result.reply) {
-            // On NE peut PAS utiliser session.say() ici : en Realtime, l'audio
-            // est produit par le modèle lui-même et la session n'embarque
-            // aucun TTS séparé — say() échoue avec « trying to generate
-            // speech from text without a TTS model ». On demande donc au
-            // modèle de prononcer exactement ce texte : c'est lui qui tient
-            // le chemin audio.
-            await session.generateReply({
-              instructions: `Dis EXACTEMENT ceci, mot pour mot, sans rien ajouter ni reformuler :\n\n${result.reply}`,
-            });
+            await speakVerbatim(result.reply);
             return;
           }
 
@@ -550,9 +577,7 @@ export default defineAgent<ProcessUserData>({
             'warn',
             { turnId, failure: result.failure, status: result.status },
           );
-          await session.generateReply({
-            instructions: `Dis EXACTEMENT ceci, mot pour mot : ${stallLine(cfg.primaryLanguage ?? 'fr')}`,
-          });
+          await speakVerbatim(stallLine(cfg.primaryLanguage ?? 'fr'));
         } catch (err) {
           clearTimeout(stallTimer);
           console.warn(
@@ -1017,9 +1042,7 @@ export default defineAgent<ProcessUserData>({
             `[webhook_agent] accueil → ${opening.reply ? 'ok' : opening.failure} in ${opening.elapsedMs}ms`,
           );
           if (opening.reply) {
-            await this.session.generateReply({
-              instructions: `Dis EXACTEMENT ceci, mot pour mot, sans rien ajouter : ${opening.reply}`,
-            });
+            await speakVerbatim(opening.reply);
             greetingSource = 'webhook';
             return;
           }
