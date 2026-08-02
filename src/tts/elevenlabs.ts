@@ -8,18 +8,29 @@ import {
 } from './types.js';
 
 /**
- * TTS ElevenLabs (Flash v2.5).
+ * TTS ElevenLabs — modèle par défaut : **Turbo v2.5**.
  *
- * Second driver, présent pour être comparé — pas pour être adopté d'office.
- * Son intérêt supposé est la qualité de voix, en particulier en hébreu, mais
- * c'est un jugement d'oreille : ce driver existe pour que la comparaison se
- * fasse sur des échantillons réels plutôt que sur des fiches produit.
+ * Turbo et non Flash, contre l'ordre habituel, parce que c'est ce que la
+ * mesure dit. Depuis europe-west4, TTFB médian :
  *
- * Ne s'active que si `ELEVENLABS_API_KEY` est présent. Sans clé, la fabrique
- * se déclare indisponible et le sélecteur ne la propose jamais.
+ *   turbo v2.5 : 622 ms (FR) · 604 ms (HE) — fenêtre 574–627 ms
+ *   flash v2.5 : 658 ms (FR) · 673 ms (HE) — fenêtre 622–1551 ms
  *
- * On demande `output_format=pcm_24000` pour parler le format du pipeline
- * directement, sans resample.
+ * Flash est plus lent ET dispersé : un p95 à 1551 ms est disqualifiant au
+ * téléphone, où un tour qui traîne s'entend.
+ *
+ * Le critère de choix n'est pas la meilleure langue mais **la pire** : Turbo
+ * tient 604–622 ms dans les deux, là où OpenAI passe de 456 ms en français à
+ * 847 ms en hébreu. Un agent qui change de rythme en changeant de langue
+ * paraît hésitant précisément au moment où le multilingue devrait
+ * impressionner.
+ *
+ * Et un seul moteur pour toutes les langues, jamais un routage par langue :
+ * la voix changerait au milieu d'un appel quand l'appelant change de langue —
+ * ce qui détruirait la fonctionnalité même qu'on met en avant.
+ *
+ * Ne s'active que si `ELEVENLABS_API_KEY` est présent. `pcm_24000` pour
+ * parler le format du pipeline sans resample.
  */
 
 const BASE = 'https://api.elevenlabs.io/v1/text-to-speech';
@@ -38,12 +49,22 @@ class ElevenLabsTts implements TtsEngine {
       queue.cancel();
     });
 
-    // La voix du tenant est un voiceId ElevenLabs quand ce driver est actif ;
-    // sinon on retombe sur la voix par défaut du compte.
-    const voiceId = options.voice || process.env['ELEVENLABS_VOICE_ID'] || '';
+    // Les tenants sont configurés avec des noms de voix OpenAI (« alloy »,
+    // « marin »…), qui ne veulent rien dire ici : ElevenLabs attend un
+    // identifiant opaque de 20 caractères. Passer « alloy » tel quel donnerait
+    // un 404 à chaque tour, et l'agent serait muet sans que le réglage ait
+    // l'air faux. Tant que le catalogue de voix n'est pas unifié, on ne
+    // considère comme voiceId que ce qui en a la forme.
+    const looksLikeVoiceId = /^[A-Za-z0-9]{20}$/.test(options.voice ?? '');
+    const voiceId = looksLikeVoiceId
+      ? options.voice
+      : (process.env['ELEVENLABS_VOICE_ID'] ?? '');
+    if (!voiceId) {
+      throw new Error('elevenlabs: aucun voiceId utilisable');
+    }
     const url =
       `${BASE}/${encodeURIComponent(voiceId)}/stream` +
-      `?output_format=pcm_24000&model_id=${process.env['ELEVENLABS_MODEL'] ?? 'eleven_flash_v2_5'}`;
+      `?output_format=pcm_24000&model_id=${process.env['ELEVENLABS_MODEL'] ?? 'eleven_turbo_v2_5'}`;
 
     const response = await fetch(url, {
       method: 'POST',

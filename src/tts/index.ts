@@ -8,17 +8,21 @@ export { PcmFrameQueue } from './pcm-queue.js';
 /**
  * Sélection du moteur TTS.
  *
- * OpenAI est le défaut délibéré : il n'ajoute ni fournisseur ni facture, et il
- * règle le verbatim aussi bien qu'un moteur spécialisé. `TTS_ENGINE` permet de
- * basculer pour comparer — c'est la seule façon honnête de trancher une
- * question de qualité de voix.
+ * Un seul moteur sert toutes les langues d'un appel. `TTS_ENGINE` permet de
+ * basculer pour comparer — c'est la seule façon honnête de trancher, comme
+ * l'a montré l'écart entre les latences annoncées et les latences mesurées.
  *
  * Un moteur demandé mais non configuré ne fait pas échouer l'appel : on
  * retombe sur le premier moteur disponible en le disant dans les logs. Une
  * variable d'environnement oubliée ne doit pas rendre un agent muet.
  */
 
-const FACTORIES: TtsEngineFactory[] = [openAiTts, elevenLabsTts];
+// Ordre = préférence par défaut. ElevenLabs Turbo d'abord : mesuré à
+// 604–622 ms dans les deux langues contre 456/847 ms pour OpenAI, dont la
+// dispersion (366–975 ms) s'entend au téléphone. OpenAI reste le repli
+// quand aucune clé ElevenLabs n'est configurée — il n'ajoute aucun
+// fournisseur et le compte est déjà là.
+const FACTORIES: TtsEngineFactory[] = [elevenLabsTts, openAiTts];
 
 let cached: TtsEngine | null = null;
 
