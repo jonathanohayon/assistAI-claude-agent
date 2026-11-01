@@ -19,6 +19,8 @@ export interface CallUsage {
   inputTokensTotal: number;
   cachedInputTokens: number;
   outputTokens: number;
+  /** Call wall-clock these tokens cover; the web estimates only the rest. */
+  durationSeconds: number;
   /** Worker-side exact cost (src/pricing), stored for reconciliation. */
   costUsd: number;
   /** Lets the web resolve the tenant: web userId, or the called number (SIP). */
@@ -40,6 +42,7 @@ export function buildUsagePayload(u: CallUsage): Record<string, unknown> | null 
     inputTokens: uncached,
     cachedTokens: cached,
     outputTokens: output,
+    durationSeconds: Math.max(0, Math.round(u.durationSeconds)),
     costUsd: Number.isFinite(u.costUsd) ? u.costUsd : undefined,
     ...(u.userId ? { userId: u.userId } : {}),
     ...(u.toNumber ? { toNumber: u.toNumber } : {}),

@@ -1477,6 +1477,7 @@ export default defineAgent<ProcessUserData>({
         cachedInputTokens,
         outputTokens: outputTokensTotal,
         costUsd,
+        durationSeconds: (Date.now() - sessionStartedAt) / 1000,
         userId: origin.kind === 'web' ? origin.userId : undefined,
         toNumber: toNumber || undefined,
       });

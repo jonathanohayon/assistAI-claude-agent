@@ -9,6 +9,7 @@ const base = {
   cachedInputTokens: 400,
   outputTokens: 250,
   costUsd: 0.0123,
+  durationSeconds: 95.4,
 };
 
 // sends only the uncached part as inputTokens, so cached tokens are not billed twice
@@ -19,6 +20,7 @@ const base = {
   assert.equal(p['outputTokens'], 250);
   assert.equal(p['callId'], 'room_1');
   assert.equal(p['costUsd'], 0.0123);
+  assert.equal(p['durationSeconds'], 95);
 }
 
 // skips a call that never reached the model (the route rejects all-zero bodies)
