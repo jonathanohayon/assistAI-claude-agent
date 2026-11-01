@@ -27,7 +27,6 @@ import * as openai from '@livekit/agents-plugin-openai';
 // model "quailVfS" (5.3 MB, même fenêtre 15ms).
 import { audioEnhancement } from '@livekit/plugins-ai-coustics';
 import { RoomEvent } from '@livekit/rtc-node';
-import { RoomServiceClient } from 'livekit-server-sdk';
 import { z } from 'zod';
 
 import {
@@ -42,6 +41,8 @@ import {
 import { getTtsEngine } from './src/tts/index.js';
 import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
+import { ConfigRefusedError } from './src/config-refusal.js';
+import { deleteRoom } from './src/hangup.js';
 import {
   END_CALL_HARD_CAP_MS,
   END_CALL_TRAILING_MS,
@@ -172,7 +173,23 @@ export default defineAgent<ProcessUserData>({
       { origin, roomName: ctx.room.name },
     );
 
-    const cfg = await fetchConfig(origin);
+    let cfg: Awaited<ReturnType<typeof fetchConfig>>;
+    try {
+      cfg = await fetchConfig(origin);
+    } catch (e) {
+      if (!(e instanceof ConfigRefusedError)) throw e;
+      // The web refused this call (unknown number, trial over). Never answer
+      // with the default persona: one error event, then drop the line.
+      await remoteLog(
+        'agent',
+        'call_refused',
+        `Appel refusé (${e.reason}) — ${originLabel}`,
+        'error',
+        { reason: e.reason, origin },
+      );
+      await deleteRoom(ctx.room.name ?? '');
+      return;
+    }
 
     // ── Mode BYO-agent ──────────────────────────────────────────────────
     // Quand le tenant a branché son propre agent, le modèle Realtime cesse
@@ -703,24 +720,7 @@ export default defineAgent<ProcessUserData>({
       // we must delete the LiveKit room — this disconnects ALL participants
       // including the SIP one. Without this, the caller hears silence after
       // the agent's last words but the line stays open.
-      try {
-        const lkUrl = process.env['LIVEKIT_URL'];
-        const lkKey = process.env['LIVEKIT_API_KEY'];
-        const lkSecret = process.env['LIVEKIT_API_SECRET'];
-        if (lkUrl && lkKey && lkSecret) {
-          const httpUrl = lkUrl.replace(/^wss?:\/\//, (m) =>
-            m === 'wss://' ? 'https://' : 'http://',
-          );
-          const svc = new RoomServiceClient(httpUrl, lkKey, lkSecret);
-          await svc.deleteRoom(ctx.room.name ?? '');
-        } else {
-          console.warn(
-            '[hangup] LIVEKIT_URL/KEY/SECRET missing — skipping deleteRoom (SIP call may stay open)',
-          );
-        }
-      } catch (e) {
-        console.warn('[hangup] deleteRoom threw:', (e as Error).message);
-      }
+      await deleteRoom(ctx.room.name ?? '');
     };
 
     // ── Latency instrumentation ─────────────────────────────────────────

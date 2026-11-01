@@ -26,6 +26,7 @@ import type {
   FetchedConfig,
   SessionOrigin,
 } from './types.js';
+import { ConfigRefusedError, refusalFromResponse } from './config-refusal.js';
 import { fetchVoxConfigByPhone, voxInstructions } from './vox-config.js';
 import { webGet } from './web-api.js';
 
@@ -138,6 +139,11 @@ export async function fetchConfig(
 
     const res = await webGet(path, { timeoutMs: CONFIG_FETCH_TIMEOUT_MS });
     if (!res.ok) {
+      const refusal = refusalFromResponse(
+        res.status,
+        await res.json().catch(() => null),
+      );
+      if (refusal) throw new ConfigRefusedError(refusal);
       console.warn(
         `[config] /api/agent/config → ${res.status}, using defaults`,
       );
@@ -186,6 +192,7 @@ export async function fetchConfig(
         : {}),
     };
   } catch (e) {
+    if (e instanceof ConfigRefusedError) throw e;
     console.warn(
       `[config] fetch failed (${(e as Error).message}), using defaults`,
     );
