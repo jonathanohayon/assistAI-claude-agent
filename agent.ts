@@ -40,6 +40,7 @@ import {
   type WebhookTurn,
 } from './src/agent-webhook.js';
 import { getTtsEngine } from './src/tts/index.js';
+import { closeWithTimeout, createZombieWatch } from './src/realtime-shutdown.js';
 import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
 import {
@@ -241,12 +242,37 @@ export default defineAgent<ProcessUserData>({
     // envoyer des ClientEvent custom (session.update temperature à chaud,
     // notamment). Set par LoggingRealtimeModel.session() override.
     let capturedRtSession: openai.realtime.RealtimeSession | null = null;
+    // Flags a Realtime WebSocket that outlives the job (src/realtime-shutdown).
+    const zombieWatch = createZombieWatch();
+    ctx.addShutdownCallback(async () => {
+      const { lastEventAgoMs } = zombieWatch.markShutdown();
+      const result = await closeWithTimeout(capturedRtSession, 3_000);
+      void remoteLog(
+        'agent',
+        'realtime_session_shutdown',
+        `Realtime session at job shutdown: ${result} (last server event ${lastEventAgoMs ?? '?'} ms before)`,
+        result === 'timeout' || result === 'error' ? 'warn' : 'info',
+        { result, lastEventAgoMs },
+      );
+    });
 
     class LoggingRealtimeModel extends openai.realtime.RealtimeModel {
       override session(): openai.realtime.RealtimeSession {
         const sess = super.session();
         capturedRtSession = sess;
         sess.on('openai_server_event_received', (event: unknown) => {
+          if (zombieWatch.onEvent()) {
+            // The job is over but OpenAI is still talking to us: a surviving
+            // WebSocket. Reported once; close it again.
+            void remoteLog(
+              'agent',
+              'realtime_zombie_detected',
+              'OpenAI Realtime event received after job shutdown — closing the session again',
+              'error',
+              { eventType: (event as { type?: string })?.type ?? null },
+            );
+            void closeWithTimeout(sess, 3_000);
+          }
           const e = event as {
             type?: string;
             error?: { code?: string; message?: string; param?: string };
