@@ -40,6 +40,7 @@ import {
   type WebhookTurn,
 } from './src/agent-webhook.js';
 import { getTtsEngine } from './src/tts/index.js';
+import { reportUsage } from './src/usage-report.js';
 import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
 import {
@@ -188,9 +189,9 @@ export default defineAgent<ProcessUserData>({
     void remoteLog(
       'agent',
       'config_loaded',
-      `Config chargée : ${cfg.model} / ${cfg.voice} / t°${cfg.temperature}`,
+      `Config chargée : ${cfg.model} / ${cfg.voice}`,
       'info',
-      { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
+      { model: cfg.model, voice: cfg.voice },
     );
 
     // Accueil instantané : on lance le fetch de l'opener pré-généré DÈS
@@ -237,9 +238,8 @@ export default defineAgent<ProcessUserData>({
 
     // Generic OpenAI server-event listener : capture les timings clés pour
     // l'instrumentation latence, et log les errors serveur.
-    // Captured ref vers la RealtimeSession active pour pouvoir lui
-    // envoyer des ClientEvent custom (session.update temperature à chaud,
-    // notamment). Set par LoggingRealtimeModel.session() override.
+    // Captured ref to the active RealtimeSession, for custom ClientEvents.
+    // Set by the LoggingRealtimeModel.session() override.
     let capturedRtSession: openai.realtime.RealtimeSession | null = null;
 
     class LoggingRealtimeModel extends openai.realtime.RealtimeModel {
@@ -322,17 +322,14 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
-    // On garde une ref au LoggingRealtimeModel pour pouvoir lui envoyer
-    // un session.update à chaud après start (cf. plus bas — pilote la
-    // temperature même si le constructor refuse de la prendre).
     const rtModel = new LoggingRealtimeModel({
       apiKey,
       baseURL: REALTIME_CONFIG.apiBase,
       model: cfg.model,
       modalities: [...REALTIME_CONFIG.modalities],
       voice: cfg.voice,
-      // temperature : pas dans le constructor (deprecated dans GA), on
-      // tente un session.update à chaud après que la session se connecte.
+      // No temperature: OpenAI Realtime GA rejects it (constructor and
+      // session.update alike: `Unknown parameter: 'session.temperature'`).
       speed: cfg.speed,
       // maxResponseOutputTokens : SDK default = 'inf'. On a tenté un cap
       // 220 (tunable depuis admin) le 12/05/26 — ça coupait le greeting
@@ -1315,13 +1312,6 @@ export default defineAgent<ProcessUserData>({
         throw e;
       }
 
-      // NB : on n'envoie PLUS de session.update temperature ici. OpenAI
-      // Realtime GA a retiré le param (`Unknown parameter: 'session.temperature'`)
-      // → l'event était rejeté à CHAQUE appel (bruit de logs) ET partait pile
-      // au moment où l'accueil se génère : un session.update concurrent à la
-      // réponse en cours peut retarder le 1er audio (greetingMs). On le retire.
-      // `capturedRtSession` reste capturé (LoggingRealtimeModel) pour un usage
-      // futur éventuel de ClientEvents custom.
       void capturedRtSession;
 
       // Mark the moment the session is ready — anything after this until the
@@ -1478,6 +1468,17 @@ export default defineAgent<ProcessUserData>({
           // drill-down par channel.
           channel: origin.kind === 'sip' ? origin.channel : undefined,
         },
+      });
+      // Real token usage for the admin Finance box (estimated until this lands).
+      await reportUsage({
+        callId: ctx.room.name ?? 'call',
+        model: cfg.model,
+        inputTokensTotal,
+        cachedInputTokens,
+        outputTokens: outputTokensTotal,
+        costUsd,
+        userId: origin.kind === 'web' ? origin.userId : undefined,
+        toNumber: toNumber || undefined,
       });
       await remoteLog(
         'agent',
