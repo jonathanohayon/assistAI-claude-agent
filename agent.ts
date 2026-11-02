@@ -663,6 +663,7 @@ export default defineAgent<ProcessUserData>({
         toNumber,
         origin.kind === 'web' ? origin.userId : undefined,
         origin.kind === 'sip' ? origin.channel : undefined,
+        (Date.now() - sessionStartedAt) / 1000,
       );
     };
 
