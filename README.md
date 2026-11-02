@@ -43,8 +43,7 @@ Liste exhaustive des `process.env` réellement lus par le code :
 
 | Variable | Requis | Rôle |
 |----------|--------|------|
-| `OPENAI_API_KEY` | oui (sauf si `REALTIME_API_KEY`) | Clé OpenAI Realtime. Validée au `prewarm` (fail-fast avant le 1er appel). |
-| `REALTIME_API_KEY` | non | Override de la clé Realtime (prioritaire sur `OPENAI_API_KEY`). |
+| `OPENAI_API_KEY` | oui | Clé OpenAI Realtime. Validée au `prewarm` (fail-fast avant le 1er appel). |
 | `REALTIME_API_BASE` | non | Base URL de l'API Realtime (défaut `https://api.openai.com/v1`). |
 | `REALTIME_MODEL` | non | Modèle par défaut si `/api/agent/config` ne répond pas (défaut `gpt-realtime-2`). |
 | `REALTIME_VOICE` | non | Voix fallback (défaut `marin`). |
