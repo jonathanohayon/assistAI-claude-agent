@@ -53,7 +53,7 @@ import {
   SILENCE_GRACE_START_MS,
   SILENCE_HANGUP_MS,
 } from './src/constants.js';
-import { requireEnv } from './src/env.js';
+import { describeOpenAiKey, resolveOpenAiKey } from './src/openai-key.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { sniffLang } from './src/lang-sniff.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
@@ -91,7 +91,7 @@ export default defineAgent<ProcessUserData>({
     // le worker ne s'enregistre pas auprès de LiveKit → l'erreur est
     // visible au boot Railway, pas au premier appel. Le requireEnv per-call
     // dans entry() est conservé (belt & braces).
-    if (!process.env['REALTIME_API_KEY']) requireEnv('OPENAI_API_KEY');
+    console.log(describeOpenAiKey(resolveOpenAiKey()));
 
     // Probe région : mesure RTT réels depuis le container LK Cloud Agent
     // vers Twilio / LK SFU / OpenAI / Web. Loggé dans /dashboard/logs
@@ -105,7 +105,7 @@ export default defineAgent<ProcessUserData>({
   },
 
   entry: async (ctx: JobContext<ProcessUserData>) => {
-    const apiKey = process.env['REALTIME_API_KEY'] ?? requireEnv('OPENAI_API_KEY');
+    const apiKey = resolveOpenAiKey().key;
 
     // Phase timings — Date.now() pris à chaque transition pour identifier
     // exactement où le temps passe entre l'entry() et le moment où le
