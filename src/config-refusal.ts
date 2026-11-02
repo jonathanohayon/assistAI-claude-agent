@@ -28,3 +28,26 @@ export class ConfigRefusedError extends Error {
     this.name = 'ConfigRefusedError';
   }
 }
+
+/**
+ * Log line for a config fetch that fell back to the defaults. A 401 means the
+ * worker's INTERNAL_SECRET does not match the web's: every call would then
+ * silently run on the default persona and tools. It is logged as an error with
+ * a fixed tag so it is greppable in Railway logs (remoteLog cannot report it:
+ * /api/events uses the same secret). Never includes a secret value.
+ */
+export function configFallbackLog(
+  status: number,
+  path: string,
+): { level: 'error' | 'warn'; message: string } {
+  const route = path.split('?')[0];
+  if (status === 401 || status === 403) {
+    return {
+      level: 'error',
+      message:
+        `[config_auth_failed] ${route} → ${status}: INTERNAL_SECRET mismatch between worker and web? ` +
+        'Calls are running on the DEFAULT persona and tools until it is fixed.',
+    };
+  }
+  return { level: 'warn', message: `[config] ${route} → ${status}, using defaults` };
+}
