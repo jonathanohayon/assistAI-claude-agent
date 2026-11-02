@@ -27,7 +27,6 @@ import * as openai from '@livekit/agents-plugin-openai';
 // model "quailVfS" (5.3 MB, même fenêtre 15ms).
 import { audioEnhancement } from '@livekit/plugins-ai-coustics';
 import { RoomEvent } from '@livekit/rtc-node';
-import { RoomServiceClient } from 'livekit-server-sdk';
 import { z } from 'zod';
 
 import {
@@ -40,9 +39,12 @@ import {
   type WebhookTurn,
 } from './src/agent-webhook.js';
 import { getTtsEngine } from './src/tts/index.js';
+import { reportUsage } from './src/usage-report.js';
 import { classifyRealtimeError, createFatalGate } from './src/realtime-errors.js';
 import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
+import { ConfigRefusedError } from './src/config-refusal.js';
+import { deleteRoom } from './src/hangup.js';
 import {
   END_CALL_HARD_CAP_MS,
   END_CALL_TRAILING_MS,
@@ -173,7 +175,23 @@ export default defineAgent<ProcessUserData>({
       { origin, roomName: ctx.room.name },
     );
 
-    const cfg = await fetchConfig(origin);
+    let cfg: Awaited<ReturnType<typeof fetchConfig>>;
+    try {
+      cfg = await fetchConfig(origin);
+    } catch (e) {
+      if (!(e instanceof ConfigRefusedError)) throw e;
+      // The web refused this call (unknown number, trial over). Never answer
+      // with the default persona: one error event, then drop the line.
+      await remoteLog(
+        'agent',
+        'call_refused',
+        `Appel refusé (${e.reason}) — ${originLabel}`,
+        'error',
+        { reason: e.reason, origin },
+      );
+      await deleteRoom(ctx.room.name ?? '');
+      return;
+    }
 
     // ── Mode BYO-agent ──────────────────────────────────────────────────
     // Quand le tenant a branché son propre agent, le modèle Realtime cesse
@@ -189,9 +207,9 @@ export default defineAgent<ProcessUserData>({
     void remoteLog(
       'agent',
       'config_loaded',
-      `Config chargée : ${cfg.model} / ${cfg.voice} / t°${cfg.temperature}`,
+      `Config chargée : ${cfg.model} / ${cfg.voice}`,
       'info',
-      { model: cfg.model, voice: cfg.voice, temperature: cfg.temperature },
+      { model: cfg.model, voice: cfg.voice },
     );
 
     // Accueil instantané : on lance le fetch de l'opener pré-généré DÈS
@@ -238,9 +256,8 @@ export default defineAgent<ProcessUserData>({
 
     // Generic OpenAI server-event listener : capture les timings clés pour
     // l'instrumentation latence, et log les errors serveur.
-    // Captured ref vers la RealtimeSession active pour pouvoir lui
-    // envoyer des ClientEvent custom (session.update temperature à chaud,
-    // notamment). Set par LoggingRealtimeModel.session() override.
+    // Captured ref to the active RealtimeSession, for custom ClientEvents.
+    // Set by the LoggingRealtimeModel.session() override.
     let capturedRtSession: openai.realtime.RealtimeSession | null = null;
     // Fires once per call on a non-retryable OpenAI error (src/realtime-errors).
     const fatalGate = createFatalGate();
@@ -334,17 +351,14 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
-    // On garde une ref au LoggingRealtimeModel pour pouvoir lui envoyer
-    // un session.update à chaud après start (cf. plus bas — pilote la
-    // temperature même si le constructor refuse de la prendre).
     const rtModel = new LoggingRealtimeModel({
       apiKey,
       baseURL: REALTIME_CONFIG.apiBase,
       model: cfg.model,
       modalities: [...REALTIME_CONFIG.modalities],
       voice: cfg.voice,
-      // temperature : pas dans le constructor (deprecated dans GA), on
-      // tente un session.update à chaud après que la session se connecte.
+      // No temperature: OpenAI Realtime GA rejects it (constructor and
+      // session.update alike: `Unknown parameter: 'session.temperature'`).
       speed: cfg.speed,
       // maxResponseOutputTokens : SDK default = 'inf'. On a tenté un cap
       // 220 (tunable depuis admin) le 12/05/26 — ça coupait le greeting
@@ -661,6 +675,7 @@ export default defineAgent<ProcessUserData>({
         toNumber,
         origin.kind === 'web' ? origin.userId : undefined,
         origin.kind === 'sip' ? origin.channel : undefined,
+        (Date.now() - sessionStartedAt) / 1000,
       );
     };
 
@@ -715,24 +730,7 @@ export default defineAgent<ProcessUserData>({
       // we must delete the LiveKit room — this disconnects ALL participants
       // including the SIP one. Without this, the caller hears silence after
       // the agent's last words but the line stays open.
-      try {
-        const lkUrl = process.env['LIVEKIT_URL'];
-        const lkKey = process.env['LIVEKIT_API_KEY'];
-        const lkSecret = process.env['LIVEKIT_API_SECRET'];
-        if (lkUrl && lkKey && lkSecret) {
-          const httpUrl = lkUrl.replace(/^wss?:\/\//, (m) =>
-            m === 'wss://' ? 'https://' : 'http://',
-          );
-          const svc = new RoomServiceClient(httpUrl, lkKey, lkSecret);
-          await svc.deleteRoom(ctx.room.name ?? '');
-        } else {
-          console.warn(
-            '[hangup] LIVEKIT_URL/KEY/SECRET missing — skipping deleteRoom (SIP call may stay open)',
-          );
-        }
-      } catch (e) {
-        console.warn('[hangup] deleteRoom threw:', (e as Error).message);
-      }
+      await deleteRoom(ctx.room.name ?? '');
     };
 
     // ── Latency instrumentation ─────────────────────────────────────────
@@ -1327,13 +1325,6 @@ export default defineAgent<ProcessUserData>({
         throw e;
       }
 
-      // NB : on n'envoie PLUS de session.update temperature ici. OpenAI
-      // Realtime GA a retiré le param (`Unknown parameter: 'session.temperature'`)
-      // → l'event était rejeté à CHAQUE appel (bruit de logs) ET partait pile
-      // au moment où l'accueil se génère : un session.update concurrent à la
-      // réponse en cours peut retarder le 1er audio (greetingMs). On le retire.
-      // `capturedRtSession` reste capturé (LoggingRealtimeModel) pour un usage
-      // futur éventuel de ClientEvents custom.
       void capturedRtSession;
 
       // Mark the moment the session is ready — anything after this until the
@@ -1490,6 +1481,18 @@ export default defineAgent<ProcessUserData>({
           // drill-down par channel.
           channel: origin.kind === 'sip' ? origin.channel : undefined,
         },
+      });
+      // Real token usage for the admin Finance box (estimated until this lands).
+      await reportUsage({
+        callId: ctx.room.name ?? 'call',
+        model: cfg.model,
+        inputTokensTotal,
+        cachedInputTokens,
+        outputTokens: outputTokensTotal,
+        costUsd,
+        durationSeconds: (Date.now() - sessionStartedAt) / 1000,
+        userId: origin.kind === 'web' ? origin.userId : undefined,
+        toNumber: toNumber || undefined,
       });
       await remoteLog(
         'agent',

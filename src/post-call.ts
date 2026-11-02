@@ -125,6 +125,7 @@ export async function postCallEnd(
   toNumber: string,
   userId?: string,
   channel?: CallChannel,
+  durationSeconds?: number,
 ): Promise<void> {
   const appUrl = process.env['APP_URL'];
   const secret = process.env['INTERNAL_SECRET'];
@@ -148,6 +149,11 @@ export async function postCallEnd(
     ...(userId ? { userId } : {}),
     // Canal SIP : conditionne le mode d'envoi du recap client côté web.
     ...(channel ? { channel } : {}),
+    // Real wall-clock duration. calls.duration_seconds was 0 on every row
+    // because this was never sent; billing graphs and Finance read it.
+    ...(durationSeconds !== undefined
+      ? { durationSeconds: Math.max(0, Math.round(durationSeconds)) }
+      : {}),
   };
   const res = await fetchWithRetry('[recap]', '/api/calls/end', payload);
   if (!res) {

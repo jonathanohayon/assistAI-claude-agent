@@ -50,8 +50,6 @@ export interface FetchedConfig {
   model: string;
   /** Voix Realtime (ex. "marin", "coral"). */
   voice: string;
-  /** @deprecated OpenAI Realtime GA refuse session.temperature — champ ignoré, conservé pour compat du payload web. */
-  temperature: number;
   /** Vitesse de lecture 0.5-1.5 (passée au constructor du model). */
   speed: number;
   /** Max output tokens — pas utilisé en prod (cap a cassé des greetings). */
