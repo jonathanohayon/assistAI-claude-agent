@@ -40,6 +40,7 @@ import {
 } from './src/agent-webhook.js';
 import { getTtsEngine } from './src/tts/index.js';
 import { reportUsage } from './src/usage-report.js';
+import { classifyRealtimeError, createFatalGate } from './src/realtime-errors.js';
 import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
 import { ConfigRefusedError } from './src/config-refusal.js';
@@ -258,6 +259,8 @@ export default defineAgent<ProcessUserData>({
     // Captured ref to the active RealtimeSession, for custom ClientEvents.
     // Set by the LoggingRealtimeModel.session() override.
     let capturedRtSession: openai.realtime.RealtimeSession | null = null;
+    // Fires once per call on a non-retryable OpenAI error (src/realtime-errors).
+    const fatalGate = createFatalGate();
 
     class LoggingRealtimeModel extends openai.realtime.RealtimeModel {
       override session(): openai.realtime.RealtimeSession {
@@ -303,17 +306,26 @@ export default defineAgent<ProcessUserData>({
             case 'error': {
               const errCode = e.error?.code ?? '';
               const errMsg = e.error?.message ?? 'erreur inconnue';
-              // Codes bénins : races entre cancel/response côté SDK et
-              // OpenAI. Le response.cancel envoyé après la fin d'une
-              // response est rejeté mais sans impact runtime. On garde la
-              // trace visible en `warn` (orange) pour qu'on puisse
-              // toujours diagnostiquer sans le confondre avec les vraies
-              // anomalies (rouge).
-              const BENIGN_ERROR_CODES = new Set([
-                'response_cancel_not_active',
-              ]);
-              const isBenign = BENIGN_ERROR_CODES.has(errCode);
-              if (isBenign) {
+              const kind = classifyRealtimeError(errCode);
+              if (kind === 'fatal') {
+                // Non-retryable (bad key, no quota…): report once, end the
+                // call. Repeats until teardown are dropped on purpose.
+                if (fatalGate(errCode)) {
+                  console.error('[realtime_fatal_error]', errCode, errMsg);
+                  void remoteLog(
+                    'agent',
+                    'realtime_fatal_error',
+                    `OpenAI Realtime fatal (${errCode}) — call ended: ${errMsg.slice(0, 200)}`,
+                    'error',
+                    { code: errCode, rawEvent: event },
+                  );
+                  void closeSession(`openai_fatal:${errCode}`);
+                }
+                break;
+              }
+              // Benign: cancel/response races between the SDK and OpenAI,
+              // no runtime impact. Kept visible as warn, not error.
+              if (kind === 'benign') {
                 void remoteLog(
                   'agent',
                   'realtime_server_warning',
