@@ -45,7 +45,7 @@ import type { ClosableSession } from './src/realtime-shutdown.js';
 import { geminiLiveOptions, resolveRealtimeProvider } from './src/realtime-provider.js';
 import type { RealtimeProvider } from './src/realtime-provider.js';
 import { reportUsage } from './src/usage-report.js';
-import { classifyRealtimeError, createFatalGate } from './src/realtime-errors.js';
+import { classifyRealtimeError, createFatalGate, geminiErrorCode } from './src/realtime-errors.js';
 import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
 import { ConfigRefusedError } from './src/config-refusal.js';
@@ -394,6 +394,23 @@ export default defineAgent<ProcessUserData>({
       override session(): ReturnType<google.realtime.RealtimeModel["session"]> {
         const sess = super.session();
         capturedRtSession = sess;
+        // Same fatal gate as OpenAI (#11): bad key / no billing / unknown
+        // model ends the call once, loudly, instead of a silent line.
+        sess.on('error', (ev: { error?: unknown }) => {
+          const errCode = geminiErrorCode(ev?.error);
+          const errMsg = (ev?.error as { message?: string } | undefined)?.message ?? 'unknown error';
+          if (errCode && fatalGate(errCode)) {
+            console.error('[realtime_fatal_error]', errCode, errMsg);
+            void remoteLog(
+              'agent',
+              'realtime_fatal_error',
+              `Gemini Live fatal (${errCode}) — call ended: ${errMsg.slice(0, 200)}`,
+              'error',
+              { code: errCode, provider: 'gemini' },
+            );
+            void closeSession(`gemini_fatal:${errCode}`);
+          }
+        });
         return sess;
       }
     }
@@ -1066,7 +1083,10 @@ export default defineAgent<ProcessUserData>({
         // faux turn / echo), et addToChatCtx ajoute le texte de l'opener au
         // chatCtx → le modèle SAIT qu'il a accueilli et ne resalue pas ; il
         // reste silencieux jusqu'au 1er tour client.
-        const opener = await openerPromise;
+        // Gemini POC: the pre-rendered opener is OpenAI TTS in the tenant's
+        // OpenAI voice; playing it would give the call two different voices.
+        // Let Gemini speak the greeting itself.
+        const opener = realtimeProvider === 'gemini' ? null : await openerPromise;
         if (opener) {
           try {
             this.session.input.setAudioEnabled(false);

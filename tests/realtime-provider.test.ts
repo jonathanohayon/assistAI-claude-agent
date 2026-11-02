@@ -18,7 +18,7 @@ assert.equal(resolveRealtimeProvider({ REALTIME_PROVIDER: 'xai' }), 'openai');
 // Gemini options: model, voice mapping, language, VAD
 const he = geminiLiveOptions({ voice: 'marin', primaryLanguage: 'he' }, {});
 assert.equal(he.model, DEFAULT_GEMINI_LIVE_MODEL);
-assert.equal(he.voice, 'Kore'); // OpenAI voice name -> Gemini default
+assert.equal(he.voice, 'Sulafat'); // marin (default, female) -> closest Gemini voice
 assert.equal(he.language, 'he-IL');
 assert.equal(he.apiKey, undefined); // plugin then reads GOOGLE_API_KEY itself
 assert.equal(he.realtimeInputConfig.automaticActivityDetection.silenceDurationMs, 350);
@@ -26,6 +26,12 @@ assert.equal(he.realtimeInputConfig.automaticActivityDetection.prefixPaddingMs, 
 
 assert.equal(geminiLiveOptions({ voice: 'Aoede', primaryLanguage: 'fr' }, {}).voice, 'Aoede');
 assert.equal(geminiLiveOptions({ voice: 'cedar' }, { GEMINI_VOICE: 'Leda' }).voice, 'Leda');
+// voice table: gender is preserved
+assert.equal(geminiLiveOptions({ voice: 'cedar' }, {}).voice, 'Achird');
+assert.equal(geminiLiveOptions({ voice: 'coral' }, {}).voice, 'Aoede');
+assert.equal(geminiLiveOptions({ voice: 'shimmer' }, {}).voice, 'Kore'); // other female
+assert.equal(geminiLiveOptions({ voice: 'echo' }, {}).voice, 'Charon'); // other male
+assert.equal(geminiLiveOptions({}, {}).voice, 'Kore'); // no voice set
 assert.equal(geminiLiveOptions({ primaryLanguage: 'en' }, {}).language, 'en-US');
 assert.equal(geminiLiveOptions({}, {}).language, 'fr-FR');
 assert.equal(geminiLiveOptions({}, { GEMINI_LIVE_MODEL: 'gemini-3.1-flash-live-preview' }).model, 'gemini-3.1-flash-live-preview');

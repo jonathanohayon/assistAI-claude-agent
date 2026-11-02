@@ -35,6 +35,21 @@ const GEMINI_VOICES = new Set([
   'Vindemiatrix', 'Zephyr', 'Zubenelgenubi',
 ]);
 
+/**
+ * Closest Gemini voice for the tenant's OpenAI voice, by Google's style label
+ * (https://ai.google.dev/gemini-api/docs/speech-generation#voices). Gender is
+ * preserved; the exact match is to confirm by ear in the listening test.
+ * marin is the dashboard default; cedar and coral come next in its picker.
+ */
+export const OPENAI_TO_GEMINI_VOICE: Record<string, string> = {
+  marin: 'Sulafat', // female, warm
+  cedar: 'Achird', // male, friendly
+  coral: 'Aoede', // female, breezy
+};
+/** Gender of the other OpenAI voices (same table as the web's VOICE_GENDER). */
+const OPENAI_MALE_VOICES = new Set(['ballad', 'verse', 'alloy', 'echo', 'fable', 'onyx', 'ash']);
+export const DEFAULT_GEMINI_MALE_VOICE = 'Charon';
+
 const BCP47: Record<string, string> = { he: 'he-IL', fr: 'fr-FR', en: 'en-US' };
 
 export interface GeminiLiveOptions {
@@ -58,8 +73,8 @@ export interface GeminiLiveOptions {
 /**
  * Maps the tenant config to Gemini Live options.
  * - voice: tenant voices are OpenAI names (marin, cedar…), which Gemini does
- *   not have. A Gemini voice name is kept; anything else falls back to
- *   GEMINI_VOICE or Kore.
+ *   not have. A Gemini voice name is kept; GEMINI_VOICE overrides; otherwise
+ *   OPENAI_TO_GEMINI_VOICE, then Kore (female) / Charon (male).
  * - language: BCP-47 hint from primaryLanguage. It only seeds the session:
  *   the prompt still tells the model to follow the caller's language.
  * - turn detection: closest to our OpenAI server_vad tuning (threshold 0.75,
@@ -73,9 +88,13 @@ export function geminiLiveOptions(
   env: Env = process.env,
 ): GeminiLiveOptions {
   const tenantVoice = cfg.voice?.trim() ?? '';
+  const override = env['GEMINI_VOICE']?.trim();
   const voice = GEMINI_VOICES.has(tenantVoice)
     ? tenantVoice
-    : env['GEMINI_VOICE']?.trim() || DEFAULT_GEMINI_VOICE;
+    : override
+      ? override
+      : OPENAI_TO_GEMINI_VOICE[tenantVoice] ??
+        (OPENAI_MALE_VOICES.has(tenantVoice) ? DEFAULT_GEMINI_MALE_VOICE : DEFAULT_GEMINI_VOICE);
   const apiKey = env['GOOGLE_API_KEY']?.trim();
   return {
     model: env['GEMINI_LIVE_MODEL']?.trim() || DEFAULT_GEMINI_LIVE_MODEL,
