@@ -58,7 +58,6 @@ export function defaultConfig(): FetchedConfig {
     agentName: '',
     model: REALTIME_CONFIG.model,
     voice: REALTIME_CONFIG.voice,
-    temperature: REALTIME_CONFIG.temperature,
     speed: REALTIME_CONFIG.speed,
     maxResponseTokens: 220,
     noiseReductionLevel: DEFAULT_NOISE_REDUCTION_LEVEL,
@@ -96,7 +95,6 @@ export async function fetchConfig(
         agentName: vox.name,
         model: REALTIME_CONFIG.model,
         voice: vox.voice,
-        temperature: REALTIME_CONFIG.temperature,
         speed: vox.speed,
         maxResponseTokens: 220,
         noiseReductionLevel: DEFAULT_NOISE_REDUCTION_LEVEL,
@@ -151,7 +149,6 @@ export async function fetchConfig(
       agentName: typeof data.agentName === 'string' ? data.agentName : '',
       model: data.model ?? REALTIME_CONFIG.model,
       voice: data.voice ?? REALTIME_CONFIG.voice,
-      temperature: data.temperature ?? REALTIME_CONFIG.temperature,
       speed: data.speed ?? REALTIME_CONFIG.speed,
       maxResponseTokens: data.maxResponseTokens ?? 220,
       greetingFallbackTemplate:

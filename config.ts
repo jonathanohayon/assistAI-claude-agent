@@ -18,9 +18,6 @@ export const REALTIME_CONFIG = {
     process.env['REALTIME_TRANSCRIPTION_MODEL'] ?? 'gpt-realtime-whisper',
   apiBase: process.env['REALTIME_API_BASE'] ?? 'https://api.openai.com/v1',
 
-  // Personnalité
-  temperature: 0.8,
-
   // 100% vocal — pas de canal texte côté sortie modèle
   modalities: ['audio'] as const,
 
