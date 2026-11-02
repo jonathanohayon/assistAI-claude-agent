@@ -105,4 +105,13 @@ Workflow CHANGEMENT :
 export const GREETING_INSTRUCTIONS =
   "Salue chaleureusement l'appelant : 'Bonjour, c'est Johana du centre Prestige, je suis ravie de vous entendre, comment puis-je vous aider aujourd'hui ?' Si l'appelant répond en hébreu, bascule en hébreu pour la suite.";
 
+// LiveKit dispatch name. Production inbound SIP is dispatched to
+// 'appointment-agent'. A test worker (e.g. an SDK upgrade under test) MUST set
+// AGENT_NAME to something else, otherwise it registers under the production
+// name and LiveKit can hand it real customer calls.
 export const AGENT_NAME = 'appointment-agent';
+
+/** Read at registration time (after dotenv), not at import time. */
+export function resolveAgentName(env: NodeJS.ProcessEnv = process.env): string {
+  return env['AGENT_NAME']?.trim() || AGENT_NAME;
+}

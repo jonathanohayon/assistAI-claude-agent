@@ -19,7 +19,10 @@ import { z } from 'zod';
 
 import type { BusinessConfig, BusinessWeekDay } from '../src/types.js';
 
-type Tool = llm.Tool;
+// Anonymous tool keyed by its model-visible name (agents >= 1.9: a map of
+// AnonFunctionTool, since llm.Tool now requires an id).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool params differ per tool
+type Tool = llm.AnonFunctionTool<any, any, any>;
 
 // Types dérivés de la source de vérité `src/types.ts` (D3 : les interfaces
 // locales dupliquées ont été supprimées — knowledge.ts importait déjà

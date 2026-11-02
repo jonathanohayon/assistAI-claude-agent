@@ -30,8 +30,8 @@ import { RoomEvent } from '@livekit/rtc-node';
 import { z } from 'zod';
 
 import {
-  AGENT_NAME,
   REALTIME_CONFIG,
+  resolveAgentName,
 } from './config.js';
 import {
   callAgentWebhook,
@@ -1539,6 +1539,6 @@ export default defineAgent<ProcessUserData>({
 cli.runApp(
   new WorkerOptions({
     agent: fileURLToPath(import.meta.url),
-    agentName: AGENT_NAME,
+    agentName: resolveAgentName(),
   }),
 );
