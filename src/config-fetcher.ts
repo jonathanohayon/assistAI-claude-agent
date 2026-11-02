@@ -26,7 +26,11 @@ import type {
   FetchedConfig,
   SessionOrigin,
 } from './types.js';
-import { ConfigRefusedError, refusalFromResponse } from './config-refusal.js';
+import {
+  ConfigRefusedError,
+  configFallbackLog,
+  refusalFromResponse,
+} from './config-refusal.js';
 import { fetchVoxConfigByPhone, voxInstructions } from './vox-config.js';
 import { webGet } from './web-api.js';
 
@@ -142,9 +146,9 @@ export async function fetchConfig(
         await res.json().catch(() => null),
       );
       if (refusal) throw new ConfigRefusedError(refusal);
-      console.warn(
-        `[config] /api/agent/config → ${res.status}, using defaults`,
-      );
+      const log = configFallbackLog(res.status, path);
+      if (log.level === 'error') console.error(log.message);
+      else console.warn(log.message);
       return defaultConfig();
     }
     const data = (await res.json()) as Partial<FetchedConfig>;
