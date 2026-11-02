@@ -16,6 +16,7 @@ import {
   llm,
   voice,
 } from '@livekit/agents';
+import * as google from '@livekit/agents-plugin-google';
 import * as openai from '@livekit/agents-plugin-openai';
 // 2026-05-15 : ai-coustics **Quail Voice Focus 2.1 L** comme NR unique.
 // Modèle 20 MB, window 15ms, latence 30ms, optimisé CPU temps réel.
@@ -40,6 +41,9 @@ import {
 } from './src/agent-webhook.js';
 import { getTtsEngine } from './src/tts/index.js';
 import { closeWithTimeout, createZombieWatch } from './src/realtime-shutdown.js';
+import type { ClosableSession } from './src/realtime-shutdown.js';
+import { geminiLiveOptions, resolveRealtimeProvider } from './src/realtime-provider.js';
+import type { RealtimeProvider } from './src/realtime-provider.js';
 import { reportUsage } from './src/usage-report.js';
 import { classifyRealtimeError, createFatalGate } from './src/realtime-errors.js';
 import { reportTurn } from './src/vox-config.js';
@@ -259,7 +263,7 @@ export default defineAgent<ProcessUserData>({
     // l'instrumentation latence, et log les errors serveur.
     // Captured ref to the active RealtimeSession, for custom ClientEvents.
     // Set by the LoggingRealtimeModel.session() override.
-    let capturedRtSession: openai.realtime.RealtimeSession | null = null;
+    let capturedRtSession: ClosableSession | null = null;
     // Flags a Realtime WebSocket that outlives the job (src/realtime-shutdown).
     const zombieWatch = createZombieWatch();
     ctx.addShutdownCallback(async () => {
@@ -377,7 +381,26 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
-    const rtModel = new LoggingRealtimeModel({
+    // OpenAI unless REALTIME_PROVIDER=gemini (worker-staging POC only). The
+    // BYO external-brain mode stays on OpenAI: it relies on create_response.
+    const realtimeProvider: RealtimeProvider = webhookMode
+      ? 'openai'
+      : resolveRealtimeProvider();
+
+    // Gemini Live: same capture of the session for the shutdown close (#14).
+    // The OpenAI-only raw-event latency breakdown and the fatal-error gate
+    // (#11) do not apply to it; TTFA and tokens still come from MetricsCollected.
+    class LoggingGeminiModel extends google.realtime.RealtimeModel {
+      override session(): ReturnType<google.realtime.RealtimeModel["session"]> {
+        const sess = super.session();
+        capturedRtSession = sess;
+        return sess;
+      }
+    }
+
+    const rtModel = realtimeProvider === 'gemini'
+      ? new LoggingGeminiModel(geminiLiveOptions(cfg))
+      : new LoggingRealtimeModel({
       apiKey,
       baseURL: REALTIME_CONFIG.apiBase,
       model: cfg.model,
@@ -424,6 +447,17 @@ export default defineAgent<ProcessUserData>({
         create_response: !webhookMode,
       },
     });
+
+    void remoteLog(
+      'agent',
+      'realtime_provider',
+      `Realtime provider: ${realtimeProvider}`,
+      'info',
+      {
+        provider: realtimeProvider,
+        model: realtimeProvider === 'gemini' ? geminiLiveOptions(cfg).model : cfg.model,
+      },
+    );
 
     const session = new voice.AgentSession({
       // Pas de VAD local (Silero retiré car saturait le CPU du worker).
@@ -1509,7 +1543,9 @@ export default defineAgent<ProcessUserData>({
         },
       });
       // Real token usage for the admin Finance box (estimated until this lands).
-      await reportUsage({
+      // Skipped for Gemini: the web Finance rate card is OpenAI-only, so the
+      // cost would be wrong. POC cost comes from the call_metrics tokens.
+      if (realtimeProvider !== 'gemini') await reportUsage({
         callId: ctx.room.name ?? 'call',
         model: cfg.model,
         inputTokensTotal,
