@@ -16,6 +16,7 @@ import {
   llm,
   voice,
 } from '@livekit/agents';
+import * as google from '@livekit/agents-plugin-google';
 import * as openai from '@livekit/agents-plugin-openai';
 // 2026-05-15 : ai-coustics **Quail Voice Focus 2.1 L** comme NR unique.
 // Modèle 20 MB, window 15ms, latence 30ms, optimisé CPU temps réel.
@@ -40,8 +41,11 @@ import {
 } from './src/agent-webhook.js';
 import { getTtsEngine } from './src/tts/index.js';
 import { closeWithTimeout, createZombieWatch } from './src/realtime-shutdown.js';
+import type { ClosableSession } from './src/realtime-shutdown.js';
+import { geminiLiveOptions, resolveRealtimeProvider } from './src/realtime-provider.js';
+import type { RealtimeProvider } from './src/realtime-provider.js';
 import { reportUsage } from './src/usage-report.js';
-import { classifyRealtimeError, createFatalGate } from './src/realtime-errors.js';
+import { classifyRealtimeError, createFatalGate, geminiErrorCode } from './src/realtime-errors.js';
 import { reportTurn } from './src/vox-config.js';
 import { fetchConfig } from './src/config-fetcher.js';
 import { ConfigRefusedError } from './src/config-refusal.js';
@@ -259,7 +263,7 @@ export default defineAgent<ProcessUserData>({
     // l'instrumentation latence, et log les errors serveur.
     // Captured ref to the active RealtimeSession, for custom ClientEvents.
     // Set by the LoggingRealtimeModel.session() override.
-    let capturedRtSession: openai.realtime.RealtimeSession | null = null;
+    let capturedRtSession: ClosableSession | null = null;
     // Flags a Realtime WebSocket that outlives the job (src/realtime-shutdown).
     const zombieWatch = createZombieWatch();
     ctx.addShutdownCallback(async () => {
@@ -377,7 +381,43 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
-    const rtModel = new LoggingRealtimeModel({
+    // OpenAI unless REALTIME_PROVIDER=gemini (worker-staging POC only). The
+    // BYO external-brain mode stays on OpenAI: it relies on create_response.
+    const realtimeProvider: RealtimeProvider = webhookMode
+      ? 'openai'
+      : resolveRealtimeProvider();
+
+    // Gemini Live: same capture of the session for the shutdown close (#14).
+    // The OpenAI-only raw-event latency breakdown and the fatal-error gate
+    // (#11) do not apply to it; TTFA and tokens still come from MetricsCollected.
+    class LoggingGeminiModel extends google.realtime.RealtimeModel {
+      override session(): ReturnType<google.realtime.RealtimeModel["session"]> {
+        const sess = super.session();
+        capturedRtSession = sess;
+        // Same fatal gate as OpenAI (#11): bad key / no billing / unknown
+        // model ends the call once, loudly, instead of a silent line.
+        sess.on('error', (ev: { error?: unknown }) => {
+          const errCode = geminiErrorCode(ev?.error);
+          const errMsg = (ev?.error as { message?: string } | undefined)?.message ?? 'unknown error';
+          if (errCode && fatalGate(errCode)) {
+            console.error('[realtime_fatal_error]', errCode, errMsg);
+            void remoteLog(
+              'agent',
+              'realtime_fatal_error',
+              `Gemini Live fatal (${errCode}) — call ended: ${errMsg.slice(0, 200)}`,
+              'error',
+              { code: errCode, provider: 'gemini' },
+            );
+            void closeSession(`gemini_fatal:${errCode}`);
+          }
+        });
+        return sess;
+      }
+    }
+
+    const rtModel = realtimeProvider === 'gemini'
+      ? new LoggingGeminiModel(geminiLiveOptions(cfg))
+      : new LoggingRealtimeModel({
       apiKey,
       baseURL: REALTIME_CONFIG.apiBase,
       model: cfg.model,
@@ -424,6 +464,17 @@ export default defineAgent<ProcessUserData>({
         create_response: !webhookMode,
       },
     });
+
+    void remoteLog(
+      'agent',
+      'realtime_provider',
+      `Realtime provider: ${realtimeProvider}`,
+      'info',
+      {
+        provider: realtimeProvider,
+        model: realtimeProvider === 'gemini' ? geminiLiveOptions(cfg).model : cfg.model,
+      },
+    );
 
     const session = new voice.AgentSession({
       // Pas de VAD local (Silero retiré car saturait le CPU du worker).
@@ -853,6 +904,53 @@ export default defineAgent<ProcessUserData>({
       }
     });
 
+    // Gemini watchdog: a generation that never produces audio leaves the
+    // caller in silence (seen on staging after an interrupted greeting). If
+    // the agent stays "thinking" for 4 s without speaking, interrupt it and
+    // ask for the reply again, at most twice per call.
+    if (realtimeProvider === 'gemini') {
+      const SILENT_GEN_MS = 4_000;
+      const MAX_SILENT_RETRIES = 2;
+      let silentRetries = 0;
+      let silentTimer: ReturnType<typeof setTimeout> | null = null;
+      session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
+        const next = (ev as { newState?: string }).newState;
+        if (silentTimer) {
+          clearTimeout(silentTimer);
+          silentTimer = null;
+        }
+        if (next !== 'thinking' || silentRetries >= MAX_SILENT_RETRIES) return;
+        silentTimer = setTimeout(() => {
+          silentTimer = null;
+          silentRetries += 1;
+          console.warn(`[gemini_silent_gen] no audio after ${SILENT_GEN_MS} ms, retry ${silentRetries}/${MAX_SILENT_RETRIES}`);
+          void remoteLog(
+            'agent',
+            'gemini_silent_gen',
+            `Gemini generation produced no audio in ${SILENT_GEN_MS} ms — reply re-issued (${silentRetries}/${MAX_SILENT_RETRIES})`,
+            'warn',
+            { retry: silentRetries },
+          );
+          void (async () => {
+            try {
+              await session.interrupt();
+            } catch {
+              /* nothing to interrupt */
+            }
+            session.generateReply();
+          })();
+        }, SILENT_GEN_MS);
+      });
+      // A tool round-trip also shows as "thinking": restart the clock when
+      // tools finish so a slow calendar call isn't taken for silence.
+      session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, () => {
+        if (silentTimer) {
+          clearTimeout(silentTimer);
+          silentTimer = null;
+        }
+      });
+    }
+
     // Reset on any activity that means "the call is alive".
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, resetActivity);
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
@@ -1032,7 +1130,10 @@ export default defineAgent<ProcessUserData>({
         // faux turn / echo), et addToChatCtx ajoute le texte de l'opener au
         // chatCtx → le modèle SAIT qu'il a accueilli et ne resalue pas ; il
         // reste silencieux jusqu'au 1er tour client.
-        const opener = await openerPromise;
+        // Gemini POC: the pre-rendered opener is OpenAI TTS in the tenant's
+        // OpenAI voice; playing it would give the call two different voices.
+        // Let Gemini speak the greeting itself.
+        const opener = realtimeProvider === 'gemini' ? null : await openerPromise;
         if (opener) {
           try {
             this.session.input.setAudioEnabled(false);
@@ -1088,6 +1189,11 @@ export default defineAgent<ProcessUserData>({
         // PER_CALL_CONTEXT est injecté dans le chatCtx INITIAL (constructeur),
         // donc envoyé pendant session.start(). Si greetInstructions est vide,
         // generateReply sans override → le LLM ouvre selon son persona.
+        // Gemini: no pre-rendered opener, so the model speaks the greeting.
+        // NOT muted: on staging, muting the input during a Gemini greeting
+        // made the plugin drop the greeting audio ("received server content
+        // but no active generation"). An interrupted greeting is instead
+        // recovered by the silent-generation watchdog below.
         if (greetInstructions.length > 0) {
           await this.session.generateReply({
             instructions: greetInstructions,
@@ -1509,7 +1615,9 @@ export default defineAgent<ProcessUserData>({
         },
       });
       // Real token usage for the admin Finance box (estimated until this lands).
-      await reportUsage({
+      // Skipped for Gemini: the web Finance rate card is OpenAI-only, so the
+      // cost would be wrong. POC cost comes from the call_metrics tokens.
+      if (realtimeProvider !== 'gemini') await reportUsage({
         callId: ctx.room.name ?? 'call',
         model: cfg.model,
         inputTokensTotal,
