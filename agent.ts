@@ -904,6 +904,53 @@ export default defineAgent<ProcessUserData>({
       }
     });
 
+    // Gemini watchdog: a generation that never produces audio leaves the
+    // caller in silence (seen on staging after an interrupted greeting). If
+    // the agent stays "thinking" for 4 s without speaking, interrupt it and
+    // ask for the reply again, at most twice per call.
+    if (realtimeProvider === 'gemini') {
+      const SILENT_GEN_MS = 4_000;
+      const MAX_SILENT_RETRIES = 2;
+      let silentRetries = 0;
+      let silentTimer: ReturnType<typeof setTimeout> | null = null;
+      session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
+        const next = (ev as { newState?: string }).newState;
+        if (silentTimer) {
+          clearTimeout(silentTimer);
+          silentTimer = null;
+        }
+        if (next !== 'thinking' || silentRetries >= MAX_SILENT_RETRIES) return;
+        silentTimer = setTimeout(() => {
+          silentTimer = null;
+          silentRetries += 1;
+          console.warn(`[gemini_silent_gen] no audio after ${SILENT_GEN_MS} ms, retry ${silentRetries}/${MAX_SILENT_RETRIES}`);
+          void remoteLog(
+            'agent',
+            'gemini_silent_gen',
+            `Gemini generation produced no audio in ${SILENT_GEN_MS} ms — reply re-issued (${silentRetries}/${MAX_SILENT_RETRIES})`,
+            'warn',
+            { retry: silentRetries },
+          );
+          void (async () => {
+            try {
+              await session.interrupt();
+            } catch {
+              /* nothing to interrupt */
+            }
+            session.generateReply();
+          })();
+        }, SILENT_GEN_MS);
+      });
+      // A tool round-trip also shows as "thinking": restart the clock when
+      // tools finish so a slow calendar call isn't taken for silence.
+      session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, () => {
+        if (silentTimer) {
+          clearTimeout(silentTimer);
+          silentTimer = null;
+        }
+      });
+    }
+
     // Reset on any activity that means "the call is alive".
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, resetActivity);
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
@@ -1142,12 +1189,27 @@ export default defineAgent<ProcessUserData>({
         // PER_CALL_CONTEXT est injecté dans le chatCtx INITIAL (constructeur),
         // donc envoyé pendant session.start(). Si greetInstructions est vide,
         // generateReply sans override → le LLM ouvre selon son persona.
-        if (greetInstructions.length > 0) {
-          await this.session.generateReply({
-            instructions: greetInstructions,
-          });
-        } else {
-          await this.session.generateReply();
+        // Gemini: no pre-rendered opener, so the model speaks the greeting.
+        // Mute the caller meanwhile, like the opener path above: on staging a
+        // noise at connect triggered Gemini's server VAD, interrupted the
+        // greeting, and the replacement generation never produced audio.
+        const muteForGreeting = realtimeProvider === 'gemini';
+        if (muteForGreeting) this.session.input.setAudioEnabled(false);
+        try {
+          const handle =
+            greetInstructions.length > 0
+              ? this.session.generateReply({ instructions: greetInstructions })
+              : this.session.generateReply();
+          if (muteForGreeting) {
+            await Promise.race([
+              handle.waitForPlayout(),
+              new Promise((r) => setTimeout(r, 15000)),
+            ]);
+          } else {
+            await handle;
+          }
+        } finally {
+          if (muteForGreeting) this.session.input.setAudioEnabled(true);
         }
       }
 
