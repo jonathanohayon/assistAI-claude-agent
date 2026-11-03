@@ -526,7 +526,7 @@ export default defineAgent<ProcessUserData>({
     void remoteLog(
       'agent',
       'realtime_provider',
-      `Realtime provider: ${realtimeProvider}`,
+      `Realtime provider: ${realtimeProvider} · reasoning ${realtimeProvider === 'openai' ? (reasoning?.effort ?? 'none') : 'n/a'}`,
       'info',
       {
         provider: realtimeProvider,
@@ -537,6 +537,8 @@ export default defineAgent<ProcessUserData>({
               ? grokOptions(cfg).model
               : cfg.model,
         ...(missingKey ? { fallbackFrom: requestedProvider } : {}),
+        // The effort actually sent to OpenAI ('none' = no reasoning param).
+        reasoning: realtimeProvider === 'openai' ? (reasoning?.effort ?? 'none') : 'n/a',
       },
     );
 
