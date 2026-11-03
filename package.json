@@ -11,9 +11,10 @@
     "test": "for f in tests/*.test.ts; do tsx \"$f\" || exit 1; done"
   },
   "dependencies": {
-    "@livekit/agents": "^1.4.2",
-    "@livekit/agents-plugin-openai": "^1.4.2",
-    "@livekit/plugins-ai-coustics": "^0.2.13",
+    "@livekit/agents": "^1.9.5",
+    "@livekit/agents-plugin-openai": "^1.9.5",
+    "@livekit/plugins-ai-coustics": "^0.3.5",
+    "@livekit/rtc-node": "^1.2.1",
     "dotenv": "^16.4.5",
     "livekit-server-sdk": "^2.15.3",
     "tsx": "^4.19.2",
