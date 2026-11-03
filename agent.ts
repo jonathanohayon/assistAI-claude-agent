@@ -69,7 +69,7 @@ import { describeOpenAiKey, resolveOpenAiKey } from './src/openai-key.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { sniffLang } from './src/lang-sniff.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
-import { buildPerCallContext } from './src/per-call-context.js';
+import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
 import { toIsraeliLocal } from './src/phone.js';
 import { postCallEnd, postCampaignResult } from './src/post-call.js';
 import { computeCallCostUsd } from './src/pricing.js';
@@ -1260,8 +1260,8 @@ export default defineAgent<ProcessUserData>({
         }
 
         // ── Fallback : accueil par le modèle (comportement historique) ─────
-        // PER_CALL_CONTEXT est injecté dans le chatCtx INITIAL (constructeur),
-        // donc envoyé pendant session.start(). Si greetInstructions est vide,
+        // PER_CALL_CONTEXT is at the end of the session instructions, so it is
+        // sent during session.start(). Si greetInstructions est vide,
         // generateReply sans override → le LLM ouvre selon son persona.
         // Gemini: no pre-rendered opener, so the model speaks the greeting.
         // NOT muted: on staging, muting the input during a Gemini greeting
@@ -1456,18 +1456,13 @@ export default defineAgent<ProcessUserData>({
       },
     );
 
-    // chatCtx initial : on y place le PER_CALL_CONTEXT (system message) pour
-    // qu'il soit synchronisé pendant session.start() au lieu d'un round-trip
-    // séparé en onEnter (gain sur greetingMs / E2E init). `instructions` reste
-    // STATIC_INSTRUCTIONS → prefix caché identique d'un appel à l'autre.
-    const initialChatCtx = llm.ChatContext.empty();
-    if (PER_CALL_CONTEXT.trim()) {
-      initialChatCtx.addMessage({ role: 'system', content: PER_CALL_CONTEXT });
-    }
-
+    // Per-call context goes at the END of the instructions, not in the initial
+    // chat context: on 1.9.5 each chat-context item costs a provider round
+    // trip inside session.start() (~1 s before the greeting). The static part
+    // stays an identical prefix for the prompt cache (src/per-call-context).
     const agent = new TenantAgent({
-      instructions: STATIC_INSTRUCTIONS,
-      chatCtx: initialChatCtx,
+      instructions: buildSessionInstructions(STATIC_INSTRUCTIONS, PER_CALL_CONTEXT),
+      chatCtx: llm.ChatContext.empty(),
       tools: {
         ...calendarTools,
         ...ordersTools,
