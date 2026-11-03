@@ -116,3 +116,21 @@ export function buildPerCallContext(
     .replaceAll('{caller_hint_block}', callerHintBlock);
   return { perCallContext, callerHintBlock };
 }
+
+
+/**
+ * Session instructions = the static tenant prompt, then the per-call context
+ * (date / time / caller block) APPENDED at the end.
+ *
+ * It used to go in the initial chat context as a system message. On LiveKit
+ * agents 1.9.5, session.start() awaits the provider's ack of every chat-context
+ * item (OpenAI-protocol engines), which added ~1 s before the greeting
+ * (setup.sessionStart 939-2753 ms vs 55-97 ms on 1.4.2). In the instructions
+ * it travels with the session config instead. Appended, not prepended: the
+ * long static part stays an identical prefix, so the OpenAI prompt cache
+ * still matches it from one call to the next.
+ */
+export function buildSessionInstructions(staticInstructions: string, perCallContext: string): string {
+  const ctx = perCallContext.trim();
+  return ctx ? `${staticInstructions}\n\n${ctx}` : staticInstructions;
+}
