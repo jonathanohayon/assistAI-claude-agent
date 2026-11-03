@@ -101,14 +101,15 @@ export function resolveVoiceProfile(raw: unknown): VoiceProfile {
  * 350 ms of silence). Lower = waits longer before answering (fewer cut-offs);
  * higher = answers sooner after a pause.
  */
-const VAD_BY_LEVEL: Record<number, { threshold: number; silenceMs: number }> = {
-  1: { threshold: 0.85, silenceMs: 800 },
-  2: { threshold: 0.8, silenceMs: 550 },
-  3: { threshold: 0.75, silenceMs: 350 },
-  4: { threshold: 0.7, silenceMs: 250 },
-  5: { threshold: 0.6, silenceMs: 180 },
+// Threshold and silence: patient (1) = higher threshold (less triggered by
+// noise) and longer silence. Prefix padding per Fable's table.
+const VAD_BY_LEVEL: Record<number, { threshold: number; silenceMs: number; prefixMs: number }> = {
+  1: { threshold: 0.85, silenceMs: 800, prefixMs: 300 },
+  2: { threshold: 0.8, silenceMs: 550, prefixMs: 200 },
+  3: { threshold: 0.75, silenceMs: 350, prefixMs: 150 },
+  4: { threshold: 0.7, silenceMs: 250, prefixMs: 120 },
+  5: { threshold: 0.6, silenceMs: 180, prefixMs: 100 },
 };
-const PREFIX_PADDING_MS = 150;
 
 const PACE_FACTOR = { slow: 0.9, normal: 1, fast: 1.15 } as const;
 
@@ -138,7 +139,7 @@ export function mapOpenAI(p: VoiceProfile, ctx: MapContext): OpenAIMapped {
       : {
           type: 'server_vad',
           threshold: level.threshold,
-          prefix_padding_ms: PREFIX_PADDING_MS,
+          prefix_padding_ms: level.prefixMs,
           silence_duration_ms: level.silenceMs,
           create_response: !ctx.webhookMode,
         };
@@ -179,10 +180,12 @@ export function mapGemini(p: VoiceProfile, ctx: MapContext): GeminiMapped {
   const level = VAD_BY_LEVEL[p.turnSensitivity] ?? VAD_BY_LEVEL[3]!;
   return {
     automaticActivityDetection: {
-      startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_LOW,
+      // Fable's table: start HIGH only at 5 (most eager); end HIGH from 3.
+      startOfSpeechSensitivity:
+        p.turnSensitivity >= 5 ? StartSensitivity.START_SENSITIVITY_HIGH : StartSensitivity.START_SENSITIVITY_LOW,
       endOfSpeechSensitivity:
         p.turnSensitivity >= 3 ? EndSensitivity.END_SENSITIVITY_HIGH : EndSensitivity.END_SENSITIVITY_LOW,
-      prefixPaddingMs: PREFIX_PADDING_MS,
+      prefixPaddingMs: level.prefixMs,
       silenceDurationMs: level.silenceMs,
     },
     ...(!p.bargeIn ? { activityHandling: ActivityHandling.NO_INTERRUPTION } : {}),
@@ -209,7 +212,7 @@ export function mapGrok(p: VoiceProfile, ctx: MapContext): GrokMapped {
           turnDetection: {
             type: 'server_vad',
             threshold: level.threshold,
-            prefix_padding_ms: PREFIX_PADDING_MS,
+            prefix_padding_ms: level.prefixMs,
             silence_duration_ms: level.silenceMs,
             create_response: !ctx.webhookMode,
             ...(!p.bargeIn ? { interrupt_response: false } : {}),

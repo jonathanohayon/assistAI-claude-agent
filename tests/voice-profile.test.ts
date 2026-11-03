@@ -60,6 +60,16 @@ assert.equal(o.transcriptionLanguage, 'fr');
 // sensitivity 1 waits longer before answering
 assert.equal(mapOpenAI({ ...D, turnSensitivity: 1 }, ctx).turnDetection['silence_duration_ms'], 800);
 assert.equal(mapOpenAI({ ...D, turnSensitivity: 5 }, ctx).turnDetection['silence_duration_ms'], 180);
+// prefix padding per level (Fable): 300 / 200 / 150 / 120 / 100
+assert.deepEqual(
+  [1, 2, 3, 4, 5].map((t) => mapOpenAI({ ...D, turnSensitivity: t }, ctx).turnDetection['prefix_padding_ms']),
+  [300, 200, 150, 120, 100],
+);
+// Gemini: start HIGH only at 5, end HIGH from 3
+assert.equal(mapGemini({ ...D, turnSensitivity: 5 }, ctx).automaticActivityDetection.startOfSpeechSensitivity, 'START_SENSITIVITY_HIGH');
+assert.equal(mapGemini({ ...D, turnSensitivity: 4 }, ctx).automaticActivityDetection.startOfSpeechSensitivity, 'START_SENSITIVITY_LOW');
+assert.equal(mapGemini({ ...D, turnSensitivity: 2 }, ctx).automaticActivityDetection.endOfSpeechSensitivity, 'END_SENSITIVITY_LOW');
+assert.equal(mapGemini({ ...D, turnSensitivity: 1 }, ctx).automaticActivityDetection.prefixPaddingMs, 300);
 assert.equal(mapGemini(p, ctx).activityHandling, 'NO_INTERRUPTION');
 assert.equal(mapGemini(p, ctx).automaticActivityDetection.silenceDurationMs, 800);
 assert.deepEqual(mapGrok(p, ctx).reasoningEffort, 'none');
