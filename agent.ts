@@ -18,6 +18,7 @@ import {
 } from '@livekit/agents';
 import * as google from '@livekit/agents-plugin-google';
 import * as openai from '@livekit/agents-plugin-openai';
+import * as xai from '@livekit/agents-plugin-xai';
 // 2026-05-15 : ai-coustics **Quail Voice Focus 2.1 L** comme NR unique.
 // Modèle 20 MB, window 15ms, latence 30ms, optimisé CPU temps réel.
 // Bench interne : -81% WER vs API Realtime standard sur 7 STT
@@ -42,7 +43,14 @@ import {
 import { getTtsEngine } from './src/tts/index.js';
 import { closeWithTimeout, createZombieWatch } from './src/realtime-shutdown.js';
 import type { ClosableSession } from './src/realtime-shutdown.js';
-import { geminiLiveOptions, resolveRealtimeProvider } from './src/realtime-provider.js';
+import {
+  geminiLiveOptions,
+  grokOptions,
+  openaiReasoning,
+  providerLanguageWarning,
+  resolveRealtimeProvider,
+  withKeyFallback,
+} from './src/realtime-provider.js';
 import type { RealtimeProvider } from './src/realtime-provider.js';
 import { reportUsage } from './src/usage-report.js';
 import { classifyRealtimeError, createFatalGate, geminiErrorCode } from './src/realtime-errors.js';
@@ -381,11 +389,56 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
-    // OpenAI unless REALTIME_PROVIDER=gemini (worker-staging POC only). The
-    // BYO external-brain mode stays on OpenAI: it relies on create_response.
-    const realtimeProvider: RealtimeProvider = webhookMode
+    // Engine: the tenant's admin-only setting (cfg.realtimeProvider), with
+    // REALTIME_PROVIDER as a worker-staging override. BYO external-brain mode
+    // stays on OpenAI (it relies on create_response). A provider without its
+    // API key falls back to OpenAI, loudly, rather than a silent call.
+    const requestedProvider: RealtimeProvider = webhookMode
       ? 'openai'
-      : resolveRealtimeProvider();
+      : resolveRealtimeProvider(cfg.realtimeProvider);
+    const { provider: realtimeProvider, missingKey } = withKeyFallback(requestedProvider);
+    if (missingKey) {
+      console.error(`[provider_key_missing] ${requestedProvider} requested but ${missingKey} is not set: falling back to OpenAI`);
+      void remoteLog(
+        'agent',
+        'provider_key_missing',
+        `${requestedProvider} requested but ${missingKey} is not set — call runs on OpenAI`,
+        'error',
+        { requested: requestedProvider, missingKey },
+      );
+    }
+    const languageWarning = providerLanguageWarning(realtimeProvider, cfg.primaryLanguage);
+    if (languageWarning) {
+      void remoteLog('agent', 'provider_language_warning', languageWarning, 'warn', {
+        provider: realtimeProvider,
+        language: cfg.primaryLanguage,
+      });
+    }
+
+    // Grok Voice (xAI): OpenAI-compatible Realtime. Session captured for the
+    // shutdown close (#14); its error events go through the same fatal gate.
+    class LoggingGrokModel extends xai.realtime.RealtimeModel {
+      override session(): ReturnType<xai.realtime.RealtimeModel['session']> {
+        const sess = super.session();
+        capturedRtSession = sess;
+        sess.on('error', (ev: { error?: { code?: string; message?: string; body?: { code?: string } } }) => {
+          const errCode = ev?.error?.code ?? ev?.error?.body?.code ?? '';
+          const errMsg = ev?.error?.message ?? 'unknown error';
+          if (errCode && fatalGate(errCode)) {
+            console.error('[realtime_fatal_error]', errCode, errMsg);
+            void remoteLog(
+              'agent',
+              'realtime_fatal_error',
+              `Grok Voice fatal (${errCode}) — call ended: ${errMsg.slice(0, 200)}`,
+              'error',
+              { code: errCode, provider: 'xai' },
+            );
+            void closeSession(`xai_fatal:${errCode}`);
+          }
+        });
+        return sess;
+      }
+    }
 
     // Gemini Live: same capture of the session for the shutdown close (#14).
     // The OpenAI-only raw-event latency breakdown and the fatal-error gate
@@ -415,9 +468,12 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
+    const reasoning = openaiReasoning(cfg.model);
     const rtModel = realtimeProvider === 'gemini'
       ? new LoggingGeminiModel(geminiLiveOptions(cfg))
-      : new LoggingRealtimeModel({
+      : realtimeProvider === 'xai'
+        ? new LoggingGrokModel(grokOptions(cfg))
+        : new LoggingRealtimeModel({
       apiKey,
       baseURL: REALTIME_CONFIG.apiBase,
       model: cfg.model,
@@ -426,6 +482,8 @@ export default defineAgent<ProcessUserData>({
       // No temperature: OpenAI Realtime GA rejects it (constructor and
       // session.update alike: `Unknown parameter: 'session.temperature'`).
       speed: cfg.speed,
+      // Lowest reasoning for latency, only on the admin-only gpt-realtime-2.1.
+      ...(reasoning ? { reasoning } : {}),
       // maxResponseOutputTokens : SDK default = 'inf'. On a tenté un cap
       // 220 (tunable depuis admin) le 12/05/26 — ça coupait le greeting
       // mid-phrase. La longueur de réponse est désormais gouvernée
@@ -472,7 +530,13 @@ export default defineAgent<ProcessUserData>({
       'info',
       {
         provider: realtimeProvider,
-        model: realtimeProvider === 'gemini' ? geminiLiveOptions(cfg).model : cfg.model,
+        model:
+          realtimeProvider === 'gemini'
+            ? geminiLiveOptions(cfg).model
+            : realtimeProvider === 'xai'
+              ? grokOptions(cfg).model
+              : cfg.model,
+        ...(missingKey ? { fallbackFrom: requestedProvider } : {}),
       },
     );
 
@@ -1617,7 +1681,8 @@ export default defineAgent<ProcessUserData>({
       // Real token usage for the admin Finance box (estimated until this lands).
       // Skipped for Gemini: the web Finance rate card is OpenAI-only, so the
       // cost would be wrong. POC cost comes from the call_metrics tokens.
-      if (realtimeProvider !== 'gemini') await reportUsage({
+      // Same for Grok: its usage is not priced by the web Finance box yet.
+      if (realtimeProvider === 'openai') await reportUsage({
         callId: ctx.room.name ?? 'call',
         model: cfg.model,
         inputTokensTotal,

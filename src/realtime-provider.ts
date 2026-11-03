@@ -1,26 +1,60 @@
 /**
  * Which speech-to-speech model answers the phone.
  *
- * REALTIME_PROVIDER = 'openai' (default) | 'gemini'. Production does not set it,
- * so it keeps OpenAI Realtime with no behaviour change; the Gemini Live POC
- * runs on worker-staging only. Pure helpers, unit-tested in
+ * Per tenant: `realtimeProvider` from /api/agent/config (admin-only setting,
+ * 'openai' when unset). REALTIME_PROVIDER in the env overrides it, for
+ * worker-staging only. If the chosen provider's API key is missing, the call
+ * falls back to OpenAI and logs it loudly. Pure helpers, unit-tested in
  * tests/realtime-provider.test.ts.
  */
 import { EndSensitivity, StartSensitivity } from '@google/genai';
 
-export type RealtimeProvider = 'openai' | 'gemini';
+export type RealtimeProvider = 'openai' | 'gemini' | 'xai';
 
 type Env = Record<string, string | undefined>;
 
-export function resolveRealtimeProvider(env: Env = process.env): RealtimeProvider {
-  return env['REALTIME_PROVIDER']?.trim().toLowerCase() === 'gemini' ? 'gemini' : 'openai';
+function asProvider(v: string | null | undefined): RealtimeProvider | null {
+  const p = v?.trim().toLowerCase();
+  return p === 'openai' || p === 'gemini' || p === 'xai' ? p : null;
+}
+
+/** Env override (staging) wins over the tenant setting; default OpenAI. */
+export function resolveRealtimeProvider(
+  configProvider?: string | null,
+  env: Env = process.env,
+): RealtimeProvider {
+  return asProvider(env['REALTIME_PROVIDER']) ?? asProvider(configProvider) ?? 'openai';
+}
+
+const KEY_ENV: Record<RealtimeProvider, string> = {
+  openai: 'OPENAI_API_KEY',
+  gemini: 'GOOGLE_API_KEY',
+  xai: 'XAI_API_KEY',
+};
+
+/**
+ * A provider whose key is not configured can't take the call: fall back to
+ * OpenAI rather than leave the caller in silence. `missingKey` names the
+ * variable (never its value) for the loud log.
+ */
+export function withKeyFallback(
+  provider: RealtimeProvider,
+  env: Env = process.env,
+): { provider: RealtimeProvider; missingKey: string | null } {
+  if (provider === 'openai') return { provider, missingKey: null };
+  const key = KEY_ENV[provider];
+  return env[key]?.trim() ? { provider, missingKey: null } : { provider: 'openai', missingKey: key };
 }
 
 /**
- * gemini-3.8-live: the newest native-audio Live model, available on both the
- * Gemini API (API key, what we use) and Vertex AI (an EU region later, for
- * latency). The plugin's own Gemini-API default is still a 2.5 preview.
+ * Reasoning effort for OpenAI Realtime: 'low' (latency first) on
+ * gpt-realtime-2.1*, an admin-only model. Nothing on gpt-realtime-2, so the
+ * default tenants keep their exact current behaviour.
  */
+export function openaiReasoning(model: string): { effort: 'low' } | undefined {
+  return model.startsWith('gpt-realtime-2.1') ? { effort: 'low' } : undefined;
+}
+
 export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.8-live';
 
 /** Female voice by default: the tenant personas are written as a woman. */
@@ -112,4 +146,51 @@ export function geminiLiveOptions(
       },
     },
   };
+}
+
+/**
+ * Grok Voice 3.0, pinned: the plugin's default is the deprecated
+ * grok-voice-think-fast-1.0. Doc: https://docs.x.ai/developers/model-capabilities/audio/voice-agent
+ * (grok-voice-latest is an alias of grok-voice-3.0). Hebrew is not in xAI's
+ * supported-language list: logged as a warning by the caller, not blocked.
+ */
+export const DEFAULT_GROK_VOICE_MODEL = 'grok-voice-3.0';
+
+/** Closest Grok voice by gender (GET /v1/tts/voices gives the genders). */
+export const OPENAI_TO_GROK_VOICE: Record<string, string> = {
+  marin: 'eve', // female; xAI's documented default voice
+  cedar: 'rex', // male
+  coral: 'ara', // female
+};
+const GROK_VOICES = new Set([
+  'altair', 'ara', 'atlas', 'aurora', 'carina', 'castor', 'celeste', 'cosmo',
+  'eve', 'helios', 'helix', 'iris', 'kepler', 'leo', 'liora', 'lumen', 'luna',
+  'lux', 'naksh', 'orion', 'perseus', 'rex', 'rigel', 'sal', 'sirius', 'ursa',
+  'zagan', 'zenith',
+]);
+
+export function grokOptions(
+  cfg: { voice?: string | null },
+  env: Env = process.env,
+): { model: string; voice: string; apiKey?: string } {
+  const tenantVoice = cfg.voice?.trim().toLowerCase() ?? '';
+  const override = env['GROK_VOICE']?.trim();
+  const voice = GROK_VOICES.has(tenantVoice)
+    ? tenantVoice
+    : override
+      ? override
+      : OPENAI_TO_GROK_VOICE[tenantVoice] ?? (OPENAI_MALE_VOICES.has(tenantVoice) ? 'rex' : 'eve');
+  const apiKey = env['XAI_API_KEY']?.trim();
+  return {
+    model: env['GROK_VOICE_MODEL']?.trim() || DEFAULT_GROK_VOICE_MODEL,
+    voice,
+    ...(apiKey ? { apiKey } : {}),
+  };
+}
+
+/** xAI's voice agent doesn't list Hebrew (doc above): worth a warning. */
+export function providerLanguageWarning(provider: RealtimeProvider, primaryLanguage?: string | null): string | null {
+  return provider === 'xai' && primaryLanguage === 'he'
+    ? 'Grok Voice does not list Hebrew as a supported language; quality may be poor'
+    : null;
 }

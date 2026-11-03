@@ -15,6 +15,7 @@
     "@livekit/agents": "^1.9.5",
     "@livekit/agents-plugin-google": "^1.9.5",
     "@livekit/agents-plugin-openai": "^1.9.5",
+    "@livekit/agents-plugin-xai": "^1.9.5",
     "@livekit/plugins-ai-coustics": "^0.3.5",
     "@livekit/rtc-node": "^1.2.1",
     "dotenv": "^16.4.5",
