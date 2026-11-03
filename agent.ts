@@ -1190,26 +1190,16 @@ export default defineAgent<ProcessUserData>({
         // donc envoyé pendant session.start(). Si greetInstructions est vide,
         // generateReply sans override → le LLM ouvre selon son persona.
         // Gemini: no pre-rendered opener, so the model speaks the greeting.
-        // Mute the caller meanwhile, like the opener path above: on staging a
-        // noise at connect triggered Gemini's server VAD, interrupted the
-        // greeting, and the replacement generation never produced audio.
-        const muteForGreeting = realtimeProvider === 'gemini';
-        if (muteForGreeting) this.session.input.setAudioEnabled(false);
-        try {
-          const handle =
-            greetInstructions.length > 0
-              ? this.session.generateReply({ instructions: greetInstructions })
-              : this.session.generateReply();
-          if (muteForGreeting) {
-            await Promise.race([
-              handle.waitForPlayout(),
-              new Promise((r) => setTimeout(r, 15000)),
-            ]);
-          } else {
-            await handle;
-          }
-        } finally {
-          if (muteForGreeting) this.session.input.setAudioEnabled(true);
+        // NOT muted: on staging, muting the input during a Gemini greeting
+        // made the plugin drop the greeting audio ("received server content
+        // but no active generation"). An interrupted greeting is instead
+        // recovered by the silent-generation watchdog below.
+        if (greetInstructions.length > 0) {
+          await this.session.generateReply({
+            instructions: greetInstructions,
+          });
+        } else {
+          await this.session.generateReply();
         }
       }
 
