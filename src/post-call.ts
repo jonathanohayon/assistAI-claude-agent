@@ -126,6 +126,7 @@ export async function postCallEnd(
   userId?: string,
   channel?: CallChannel,
   durationSeconds?: number,
+  engine?: { provider: string; model: string },
 ): Promise<void> {
   const appUrl = process.env['APP_URL'];
   const secret = process.env['INTERNAL_SECRET'];
@@ -154,6 +155,9 @@ export async function postCallEnd(
     ...(durationSeconds !== undefined
       ? { durationSeconds: Math.max(0, Math.round(durationSeconds)) }
       : {}),
+    // Engine that took the call, stored per call by the web (Monitoring
+    // shows the model; Finance prices per provider).
+    ...(engine ? { realtimeProvider: engine.provider, realtimeModel: engine.model } : {}),
   };
   const res = await fetchWithRetry('[recap]', '/api/calls/end', payload);
   if (!res) {

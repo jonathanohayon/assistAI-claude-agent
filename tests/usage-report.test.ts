@@ -23,11 +23,32 @@ const base = {
   assert.equal(p['durationSeconds'], 95);
 }
 
-// skips a call that never reached the model (the route rejects all-zero bodies)
+// skips a call that never reached the model: no tokens and no cost
 assert.equal(
-  buildUsagePayload({ ...base, inputTokensTotal: 0, cachedInputTokens: 0, outputTokens: 0 }),
+  buildUsagePayload({ ...base, inputTokensTotal: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: 0 }),
   null,
 );
+
+// Grok (per-minute engine): no tokens but a real cost -> still reported, with
+// its provider and real model
+{
+  const grok = buildUsagePayload({
+    ...base,
+    provider: 'xai',
+    model: 'grok-voice-3.0',
+    inputTokensTotal: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0.12,
+  })!;
+  assert.ok(grok);
+  assert.equal(grok['provider'], 'xai');
+  assert.equal(grok['model'], 'grok-voice-3.0');
+  assert.equal(grok['costUsd'], 0.12);
+  assert.equal(grok['inputTokens'], 0);
+}
+// OpenAI payloads without a provider stay exactly as before
+assert.equal('provider' in buildUsagePayload(base)!, false);
 
 // clamps a cached count larger than the total instead of going negative
 {

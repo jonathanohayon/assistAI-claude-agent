@@ -66,3 +66,56 @@ export function computeRealtimeCostUsd(b: TokenBuckets, model: string): number {
     1_000_000;
   return usd;
 }
+
+/**
+ * Gemini Live, USD per 1M tokens. Gemini API pricing page
+ * (https://ai.google.dev/gemini-api/docs/pricing) and Vertex AI pricing agree
+ * for gemini-3.8-live: text in 0.75, audio in 3.00, text out 4.50, audio out
+ * 12.00. No cached-input rate for Live: cached tokens are billed as input.
+ */
+const GEMINI_RATES: Record<string, { audioIn: number; textIn: number; audioOut: number; textOut: number }> = {
+  'gemini-3.8-live': { audioIn: 3, textIn: 0.75, audioOut: 12, textOut: 4.5 },
+};
+const DEFAULT_GEMINI_RATES = GEMINI_RATES['gemini-3.8-live']!;
+
+/**
+ * Grok Voice is billed per minute of session, not per token:
+ * https://docs.x.ai/developers/pricing ("Speech to Speech (grok-voice-3.0)
+ * $0.08 / min"). grok-voice-latest is an alias of 3.0.
+ */
+export const XAI_USD_PER_MINUTE = 0.08;
+
+export type CallPricing = 'tokens' | 'per_minute';
+
+/**
+ * Cost of one call for any engine. OpenAI: unchanged (token rates above).
+ * Gemini: token rates above. xAI: connected session time x per-minute rate
+ * (the plugin reports no tokens for Grok).
+ */
+export function computeCallCostUsd(args: {
+  provider: 'openai' | 'gemini' | 'xai';
+  model: string;
+  tokens: TokenBuckets;
+  sessionSeconds: number;
+}): { costUsd: number; pricing: CallPricing } {
+  const { provider, model, tokens, sessionSeconds } = args;
+  if (provider === 'xai') {
+    const minutes = Math.max(0, sessionSeconds) / 60;
+    return { costUsd: round6(minutes * XAI_USD_PER_MINUTE), pricing: 'per_minute' };
+  }
+  if (provider === 'gemini') {
+    const r = GEMINI_RATES[model] ?? DEFAULT_GEMINI_RATES;
+    const cost =
+      (tokens.inAudio * r.audioIn +
+        tokens.inText * r.textIn +
+        tokens.outAudio * r.audioOut +
+        tokens.outText * r.textOut) /
+      1_000_000;
+    return { costUsd: round6(cost), pricing: 'tokens' };
+  }
+  return { costUsd: computeRealtimeCostUsd(tokens, model), pricing: 'tokens' };
+}
+
+function round6(n: number): number {
+  return Math.round(n * 1e6) / 1e6;
+}
