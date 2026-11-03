@@ -72,7 +72,7 @@ import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { buildPerCallContext } from './src/per-call-context.js';
 import { toIsraeliLocal } from './src/phone.js';
 import { postCallEnd, postCampaignResult } from './src/post-call.js';
-import { computeRealtimeCostUsd } from './src/pricing.js';
+import { computeCallCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
 import { extractText } from './src/transcript.js';
@@ -469,6 +469,17 @@ export default defineAgent<ProcessUserData>({
     }
 
     const reasoning = openaiReasoning(cfg.model);
+    // The engine that actually takes this call, with its real model id: on
+    // every per-call event (Monitoring card, Finance, calls row).
+    const engine = {
+      provider: realtimeProvider,
+      model:
+        realtimeProvider === 'gemini'
+          ? geminiLiveOptions(cfg).model
+          : realtimeProvider === 'xai'
+            ? grokOptions(cfg).model
+            : cfg.model,
+    };
     const rtModel = realtimeProvider === 'gemini'
       ? new LoggingGeminiModel(geminiLiveOptions(cfg))
       : realtimeProvider === 'xai'
@@ -530,12 +541,8 @@ export default defineAgent<ProcessUserData>({
       'info',
       {
         provider: realtimeProvider,
-        model:
-          realtimeProvider === 'gemini'
-            ? geminiLiveOptions(cfg).model
-            : realtimeProvider === 'xai'
-              ? grokOptions(cfg).model
-              : cfg.model,
+        model: engine.model,
+        engine,
         ...(missingKey ? { fallbackFrom: requestedProvider } : {}),
         // The effort actually sent to OpenAI ('none' = no reasoning param).
         reasoning: realtimeProvider === 'openai' ? (reasoning?.effort ?? 'none') : 'n/a',
@@ -819,6 +826,7 @@ export default defineAgent<ProcessUserData>({
         origin.kind === 'web' ? origin.userId : undefined,
         origin.kind === 'sip' ? origin.channel : undefined,
         (Date.now() - sessionStartedAt) / 1000,
+        engine,
       );
     };
 
@@ -1571,8 +1579,11 @@ export default defineAgent<ProcessUserData>({
         : null;
       // Coût USD de l'appel à partir du breakdown tokens (cf. src/pricing).
       const totalTokens = inputTokensTotal + outputTokensTotal;
-      const costUsd = computeRealtimeCostUsd(
-        {
+      // Per engine: OpenAI/Gemini by tokens, Grok by connected minute.
+      const { costUsd, pricing } = computeCallCostUsd({
+        provider: engine.provider,
+        model: engine.model,
+        tokens: {
           inAudio: inAudioTokens,
           inText: inTextTokens,
           inCachedAudio: inCachedAudioTokens,
@@ -1580,8 +1591,8 @@ export default defineAgent<ProcessUserData>({
           outAudio: outAudioTokens,
           outText: outTextTokens,
         },
-        cfg.model,
-      );
+        sessionSeconds: (Date.now() - sessionStartedAt) / 1000,
+      });
       const fmt = (ms: number | null) =>
         ms == null ? '?' : `${(ms / 1000).toFixed(2)}s`;
       const fmtMs = (ms: number | null) => (ms == null ? '?' : `${ms}ms`);
@@ -1635,13 +1646,17 @@ export default defineAgent<ProcessUserData>({
         // Consommation + coût de l'appel (affiché dans /dashboard/logs).
         // Coût figé au tarif du moment de l'appel → historiquement exact.
         usage: {
-          model: cfg.model,
+          provider: engine.provider,
+          model: engine.model,
           inputTokens: inputTokensTotal,
           outputTokens: outputTokensTotal,
-          totalTokens,
+          // Absent (not 0) when the engine reports no tokens (Grok).
+          ...(totalTokens > 0 ? { totalTokens } : {}),
           cachedInputTokens,
           costUsd,
+          pricing,
         },
+        engine,
         // Routing context for filtering in /dashboard/logs
         fromNumber,
         toNumber,
@@ -1680,13 +1695,11 @@ export default defineAgent<ProcessUserData>({
           channel: origin.kind === 'sip' ? origin.channel : undefined,
         },
       });
-      // Real token usage for the admin Finance box (estimated until this lands).
-      // Skipped for Gemini: the web Finance rate card is OpenAI-only, so the
-      // cost would be wrong. POC cost comes from the call_metrics tokens.
-      // Same for Grok: its usage is not priced by the web Finance box yet.
-      if (realtimeProvider === 'openai') await reportUsage({
+      // Real usage for the admin Finance box, every engine, with its own cost.
+      await reportUsage({
         callId: ctx.room.name ?? 'call',
-        model: cfg.model,
+        provider: engine.provider,
+        model: engine.model,
         inputTokensTotal,
         cachedInputTokens,
         outputTokens: outputTokensTotal,
@@ -1704,6 +1717,7 @@ export default defineAgent<ProcessUserData>({
           transcriptEntries: transcript.length,
           fromNumber,
           toNumber,
+          engine,
         },
       );
       await triggerRecap();

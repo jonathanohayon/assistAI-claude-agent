@@ -14,6 +14,9 @@ import { webPost } from './web-api.js';
 
 export interface CallUsage {
   callId: string;
+  /** Engine that took the call (openai | gemini | xai). */
+  provider?: 'openai' | 'gemini' | 'xai';
+  /** The engine's real model id (gpt-realtime-2.1, gemini-3.8-live, grok-voice-3.0). */
   model: string;
   /** Total input tokens, cached included (as reported by Realtime). */
   inputTokensTotal: number;
@@ -32,12 +35,14 @@ export function buildUsagePayload(u: CallUsage): Record<string, unknown> | null 
   const cached = Math.max(0, Math.min(u.cachedInputTokens, u.inputTokensTotal));
   const uncached = Math.max(0, u.inputTokensTotal - cached);
   const output = Math.max(0, u.outputTokens);
-  // The route rejects an all-zero body; a call that never reached the model
-  // has nothing to bill anyway.
-  if (uncached === 0 && cached === 0 && output === 0) return null;
+  // Nothing to bill: no tokens and no cost (a call that never reached the
+  // model). A per-minute engine (Grok) has no tokens but a cost, so it is sent.
+  const cost = Number.isFinite(u.costUsd) ? u.costUsd : 0;
+  if (uncached === 0 && cached === 0 && output === 0 && cost <= 0) return null;
 
   return {
     callId: u.callId,
+    ...(u.provider ? { provider: u.provider } : {}),
     model: u.model,
     inputTokens: uncached,
     cachedTokens: cached,
