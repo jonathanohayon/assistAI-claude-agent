@@ -3,17 +3,50 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_GEMINI_LIVE_MODEL,
   geminiLiveOptions,
+  grokOptions,
+  openaiReasoning,
+  providerLanguageWarning,
   resolveRealtimeProvider,
+  withKeyFallback,
 } from '../src/realtime-provider.js';
 
-// PRODUCTION: no REALTIME_PROVIDER set -> OpenAI, exactly as before
-assert.equal(resolveRealtimeProvider({}), 'openai');
-assert.equal(resolveRealtimeProvider({ REALTIME_PROVIDER: '' }), 'openai');
-// only an explicit 'gemini' switches; typos and unknown values stay on OpenAI
-assert.equal(resolveRealtimeProvider({ REALTIME_PROVIDER: 'gemini' }), 'gemini');
-assert.equal(resolveRealtimeProvider({ REALTIME_PROVIDER: ' Gemini ' }), 'gemini');
-assert.equal(resolveRealtimeProvider({ REALTIME_PROVIDER: 'gemni' }), 'openai');
-assert.equal(resolveRealtimeProvider({ REALTIME_PROVIDER: 'xai' }), 'openai');
+// PRODUCTION: no tenant setting, no env override -> OpenAI, exactly as before
+assert.equal(resolveRealtimeProvider(undefined, {}), 'openai');
+assert.equal(resolveRealtimeProvider(null, {}), 'openai');
+assert.equal(resolveRealtimeProvider('openai', {}), 'openai');
+assert.equal(resolveRealtimeProvider('something-else', {}), 'openai');
+// the tenant's admin-only setting picks the engine
+assert.equal(resolveRealtimeProvider('gemini', {}), 'gemini');
+assert.equal(resolveRealtimeProvider('xai', {}), 'xai');
+// staging env override wins over the tenant; typos are ignored
+assert.equal(resolveRealtimeProvider('openai', { REALTIME_PROVIDER: ' Gemini ' }), 'gemini');
+assert.equal(resolveRealtimeProvider('gemini', { REALTIME_PROVIDER: 'openai' }), 'openai');
+assert.equal(resolveRealtimeProvider('xai', { REALTIME_PROVIDER: 'gemni' }), 'xai');
+assert.equal(resolveRealtimeProvider(undefined, { REALTIME_PROVIDER: '' }), 'openai');
+
+// missing key -> OpenAI fallback, naming the variable (never a value)
+assert.deepEqual(withKeyFallback('gemini', {}), { provider: 'openai', missingKey: 'GOOGLE_API_KEY' });
+assert.deepEqual(withKeyFallback('xai', { XAI_API_KEY: '  ' }), { provider: 'openai', missingKey: 'XAI_API_KEY' });
+assert.deepEqual(withKeyFallback('xai', { XAI_API_KEY: 'k' }), { provider: 'xai', missingKey: null });
+assert.deepEqual(withKeyFallback('openai', {}), { provider: 'openai', missingKey: null });
+
+// reasoning: only the admin-only 2.1 models get it; gpt-realtime-2 unchanged
+assert.equal(openaiReasoning('gpt-realtime-2'), undefined);
+assert.deepEqual(openaiReasoning('gpt-realtime-2.1'), { effort: 'low' });
+assert.deepEqual(openaiReasoning('gpt-realtime-2.1-mini'), { effort: 'low' });
+
+// Grok: pinned to grok-voice-3.0 (plugin default is a deprecated model)
+assert.equal(grokOptions({}, {}).model, 'grok-voice-3.0');
+assert.equal(grokOptions({ voice: 'marin' }, {}).voice, 'eve');
+assert.equal(grokOptions({ voice: 'cedar' }, {}).voice, 'rex');
+assert.equal(grokOptions({ voice: 'coral' }, {}).voice, 'ara');
+assert.equal(grokOptions({ voice: 'echo' }, {}).voice, 'rex'); // other male
+assert.equal(grokOptions({ voice: 'shimmer' }, {}).voice, 'eve'); // other female
+assert.equal(grokOptions({ voice: 'Leo' }, {}).voice, 'leo'); // a Grok voice is kept
+assert.equal(grokOptions({}, { GROK_VOICE_MODEL: 'grok-voice-latest' }).model, 'grok-voice-latest');
+assert.equal(providerLanguageWarning('xai', 'he') !== null, true);
+assert.equal(providerLanguageWarning('xai', 'fr'), null);
+assert.equal(providerLanguageWarning('gemini', 'he'), null);
 
 // Gemini options: model, voice mapping, language, VAD
 const he = geminiLiveOptions({ voice: 'marin', primaryLanguage: 'he' }, {});

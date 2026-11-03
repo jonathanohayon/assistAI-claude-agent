@@ -157,6 +157,10 @@ export async function fetchConfig(
       instructions: data.instructions ?? FALLBACK_INSTRUCTIONS,
       greetingInstructions: data.greetingInstructions ?? FALLBACK_GREETING,
       agentName: typeof data.agentName === 'string' ? data.agentName : '',
+      realtimeProvider:
+        data.realtimeProvider === 'gemini' || data.realtimeProvider === 'xai'
+          ? data.realtimeProvider
+          : 'openai',
       model: data.model ?? REALTIME_CONFIG.model,
       voice: data.voice ?? REALTIME_CONFIG.voice,
       speed: data.speed ?? REALTIME_CONFIG.speed,

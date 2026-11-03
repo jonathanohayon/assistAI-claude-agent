@@ -41,6 +41,11 @@ export interface FetchedConfig {
    */
   agentName: string;
   /**
+   * Speech-to-speech engine chosen by an admin for this tenant ('openai'
+   * when unset or when the web predates the field). See src/realtime-provider.
+   */
+  realtimeProvider?: 'openai' | 'gemini' | 'xai';
+  /**
    * Template per-plan injecté quand `greetingInstructions` est vide.
    * Édité depuis `/admin` par l'admin. Placeholders : `{agent_name}`.
    * Si vide ET pas de greetingInstructions → pas d'override, persona seul.
