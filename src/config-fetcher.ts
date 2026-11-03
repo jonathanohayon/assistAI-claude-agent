@@ -161,6 +161,7 @@ export async function fetchConfig(
         data.realtimeProvider === 'gemini' || data.realtimeProvider === 'xai'
           ? data.realtimeProvider
           : 'openai',
+      voiceProfile: data.voiceProfile,
       model: data.model ?? REALTIME_CONFIG.model,
       voice: data.voice ?? REALTIME_CONFIG.voice,
       speed: data.speed ?? REALTIME_CONFIG.speed,

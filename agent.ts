@@ -46,7 +46,6 @@ import type { ClosableSession } from './src/realtime-shutdown.js';
 import {
   geminiLiveOptions,
   grokOptions,
-  openaiReasoning,
   providerLanguageWarning,
   resolveRealtimeProvider,
   withKeyFallback,
@@ -61,15 +60,22 @@ import { deleteRoom } from './src/hangup.js';
 import {
   END_CALL_HARD_CAP_MS,
   END_CALL_TRAILING_MS,
-  MAX_CALL_DURATION_MS,
   SILENCE_GRACE_START_MS,
-  SILENCE_HANGUP_MS,
 } from './src/constants.js';
 import { describeOpenAiKey, resolveOpenAiKey } from './src/openai-key.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { sniffLang } from './src/lang-sniff.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
+import {
+  DEFAULT_VOICE_PROFILE,
+  mapGemini,
+  mapGrok,
+  mapOpenAI,
+  mapSession,
+  profileInstructions,
+  resolveVoiceProfile,
+} from './src/voice-profile.js';
 import { toIsraeliLocal } from './src/phone.js';
 import { postCallEnd, postCampaignResult } from './src/post-call.js';
 import { computeCallCostUsd } from './src/pricing.js';
@@ -415,12 +421,23 @@ export default defineAgent<ProcessUserData>({
       });
     }
 
+    const grokMapped = mapGrok(resolveVoiceProfile(cfg.voiceProfile), {
+      model: cfg.model,
+      speed: cfg.speed,
+      primaryLanguage: cfg.primaryLanguage,
+      webhookMode,
+    });
     // Grok Voice (xAI): OpenAI-compatible Realtime. Session captured for the
     // shutdown close (#14); its error events go through the same fatal gate.
     class LoggingGrokModel extends xai.realtime.RealtimeModel {
       override session(): ReturnType<xai.realtime.RealtimeModel['session']> {
         const sess = super.session();
         capturedRtSession = sess;
+        // xAI reasoning.effort (session.update; default "high"). plugin-xai
+        // 1.9.5 doesn't send it, so we do, only when the profile says "none".
+        if (grokMapped.reasoningEffort) {
+          sess.sendEvent({ type: 'session.update', session: { reasoning: { effort: grokMapped.reasoningEffort } } } as never);
+        }
         sess.on('error', (ev: { error?: { code?: string; message?: string; body?: { code?: string } } }) => {
           const errCode = ev?.error?.code ?? ev?.error?.body?.code ?? '';
           const errMsg = ev?.error?.message ?? 'unknown error';
@@ -468,7 +485,19 @@ export default defineAgent<ProcessUserData>({
       }
     }
 
-    const reasoning = openaiReasoning(cfg.model);
+    // Voice profile (admin-only): per-engine options. The default profile maps
+    // to exactly the options used before (tests/voice-profile.test.ts).
+    const profile = resolveVoiceProfile(cfg.voiceProfile);
+    const mapCtx = {
+      model: cfg.model,
+      speed: cfg.speed,
+      primaryLanguage: cfg.primaryLanguage,
+      webhookMode,
+    };
+    const oaMapped = mapOpenAI(profile, mapCtx);
+    const geminiMapped = mapGemini(profile, mapCtx);
+    const sessionMapped = mapSession(profile);
+    const reasoning = oaMapped.reasoning;
     // The engine that actually takes this call, with its real model id: on
     // every per-call event (Monitoring card, Finance, calls row).
     const engine = {
@@ -481,18 +510,31 @@ export default defineAgent<ProcessUserData>({
             : cfg.model,
     };
     const rtModel = realtimeProvider === 'gemini'
-      ? new LoggingGeminiModel(geminiLiveOptions(cfg))
+      ? new LoggingGeminiModel({
+          ...geminiLiveOptions(cfg),
+          language: geminiMapped.language,
+          realtimeInputConfig: {
+            automaticActivityDetection: geminiMapped.automaticActivityDetection,
+            ...(geminiMapped.activityHandling ? { activityHandling: geminiMapped.activityHandling } : {}),
+          },
+          ...(profile.voiceOverrides.gemini ? { voice: profile.voiceOverrides.gemini } : {}),
+        })
       : realtimeProvider === 'xai'
-        ? new LoggingGrokModel(grokOptions(cfg))
+        ? new LoggingGrokModel({
+            ...grokOptions(cfg),
+            ...(grokMapped.turnDetection ? { turnDetection: grokMapped.turnDetection as never } : {}),
+            ...(profile.voiceOverrides.xai ? { voice: profile.voiceOverrides.xai } : {}),
+          })
         : new LoggingRealtimeModel({
       apiKey,
       baseURL: REALTIME_CONFIG.apiBase,
       model: cfg.model,
       modalities: [...REALTIME_CONFIG.modalities],
-      voice: cfg.voice,
+      voice: profile.voiceOverrides.openai ?? cfg.voice,
       // No temperature: OpenAI Realtime GA rejects it (constructor and
       // session.update alike: `Unknown parameter: 'session.temperature'`).
-      speed: cfg.speed,
+      speed: oaMapped.speed,
+      ...(oaMapped.noiseReduction ? { inputAudioNoiseReduction: oaMapped.noiseReduction } : {}),
       // Lowest reasoning for latency, only on the admin-only gpt-realtime-2.1.
       ...(reasoning ? { reasoning } : {}),
       // maxResponseOutputTokens : SDK default = 'inf'. On a tenté un cap
@@ -507,7 +549,7 @@ export default defineAgent<ProcessUserData>({
         // du tenant guide le STT — 'he', 'fr', 'en'. Le LLM continue à
         // détecter changes de langue à l'oreille, mais le transcript text
         // est correctement étiqueté.
-        language: (cfg.primaryLanguage ?? 'fr') as 'he' | 'fr' | 'en',
+        language: oaMapped.transcriptionLanguage as 'he' | 'fr' | 'en',
       },
       // inputAudioNoiseReduction RETIRÉ — ai-coustics Quail Voice
       // Focus 2.1 L (cf. inputOptions.noiseCancellation plus bas) gère
@@ -521,17 +563,8 @@ export default defineAgent<ProcessUserData>({
       // - prefix_padding_ms 150 : moins de buffer avant détection.
       // - create_response: true : l'API génère la réponse directement à
       //   la fin du tour user, sans attendre un trigger explicite.
-      turnDetection: {
-        type: 'server_vad',
-        threshold: 0.75,
-        prefix_padding_ms: 150,
-        silence_duration_ms: 350,
-        // En mode BYO-agent, laisser `create_response` à true ferait parler
-        // DEUX cerveaux : le modèle répondrait de lui-même pendant qu'on
-        // attend le endpoint du client. Le modèle devient oreille + voix,
-        // rien de plus.
-        create_response: !webhookMode,
-      },
+      // Turn detection from the voice profile (default = server_vad 0.75 / 150 / 350 ms).
+      turnDetection: oaMapped.turnDetection as never,
     });
 
     void remoteLog(
@@ -546,6 +579,13 @@ export default defineAgent<ProcessUserData>({
         ...(missingKey ? { fallbackFrom: requestedProvider } : {}),
         // The effort actually sent to OpenAI ('none' = no reasoning param).
         reasoning: realtimeProvider === 'openai' ? (reasoning?.effort ?? 'none') : 'n/a',
+        // Voice-profile settings that differ from the default (names + values),
+        // so a call proves which profile it ran with.
+        voiceProfile: Object.fromEntries(
+          Object.entries(profile).filter(
+            ([k, v]) => JSON.stringify(v) !== JSON.stringify(DEFAULT_VOICE_PROFILE[k as keyof typeof DEFAULT_VOICE_PROFILE]),
+          ),
+        ),
       },
     );
 
@@ -553,6 +593,8 @@ export default defineAgent<ProcessUserData>({
       // Pas de VAD local (Silero retiré car saturait le CPU du worker).
       // OpenAI server_vad gère la détection de tour côté serveur.
       llm: rtModel,
+      // Interruption settings from the voice profile; SDK defaults otherwise.
+      ...(sessionMapped.interruption ? { turnHandling: { interruption: sessionMapped.interruption } } : {}),
     });
 
     // ── Transcript capture ──────────────────────────────────────────────
@@ -1062,7 +1104,7 @@ export default defineAgent<ProcessUserData>({
       // presque toujours une ligne zombie (SIP pas raccroché, boucle LLM)
       // qui facture Twilio + OpenAI pour rien. Même chemin de fermeture
       // que le silence, quel que soit l'état de l'agent.
-      if (Date.now() - sessionStartedAt > MAX_CALL_DURATION_MS) {
+      if (Date.now() - sessionStartedAt > sessionMapped.maxDurationMs) {
         clearInterval(silenceWatcher);
         void closeSession('max_duration');
         return;
@@ -1076,9 +1118,9 @@ export default defineAgent<ProcessUserData>({
         resetActivity();
         return;
       }
-      if (Date.now() - lastActivity > SILENCE_HANGUP_MS) {
+      if (Date.now() - lastActivity > sessionMapped.idleHangupMs) {
         clearInterval(silenceWatcher);
-        void closeSession(`silence_${SILENCE_HANGUP_MS}ms`);
+        void closeSession(`silence_${sessionMapped.idleHangupMs}ms`);
       }
     }, 2_000);
 
@@ -1461,7 +1503,10 @@ export default defineAgent<ProcessUserData>({
     // trip inside session.start() (~1 s before the greeting). The static part
     // stays an identical prefix for the prompt cache (src/per-call-context).
     const agent = new TenantAgent({
-      instructions: buildSessionInstructions(STATIC_INSTRUCTIONS, PER_CALL_CONTEXT),
+      instructions: buildSessionInstructions(
+        [STATIC_INSTRUCTIONS, profileInstructions(profile, realtimeProvider, mapCtx)].filter(Boolean).join('\n\n'),
+        PER_CALL_CONTEXT,
+      ),
       chatCtx: llm.ChatContext.empty(),
       tools: {
         ...calendarTools,
