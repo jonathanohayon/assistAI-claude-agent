@@ -45,6 +45,8 @@ export interface FetchedConfig {
    * when unset or when the web predates the field). See src/realtime-provider.
    */
   realtimeProvider?: 'openai' | 'gemini' | 'xai';
+  /** Voice profile from the web (admin-only); resolved by src/voice-profile. */
+  voiceProfile?: unknown;
   /**
    * Template per-plan injecté quand `greetingInstructions` est vide.
    * Édité depuis `/admin` par l'admin. Placeholders : `{agent_name}`.
