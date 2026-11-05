@@ -178,7 +178,9 @@ export default defineAgent<ProcessUserData>({
     // events qui ne portent pas de toNumber (config_loaded, auto_hangup,
     // realtime_server_error, call_ended, etc.) sans avoir à les passer
     // explicitement à chaque appel.
-    enterSession({ origin });
+    // callId = LiveKit room name (unique per call): stamped on every web
+    // request and event of this call (src/session-context.ts).
+    enterSession({ origin, ...(ctx.room.name ? { callId: ctx.room.name } : {}) });
     const originLabel =
       origin.kind === 'sip'
         ? `${origin.channel === 'whatsapp' ? 'WA' : 'SIP'} ${origin.calledNumber}`
