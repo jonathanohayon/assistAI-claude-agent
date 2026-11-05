@@ -4,7 +4,7 @@
 
 /**
  * Convertit un numéro E.164 israélien en format local.
- * `+972585001007` → `0585001007`. Tout autre format est renvoyé tel quel.
+ * `+972500000000` → `0500000000`. Tout autre format est renvoyé tel quel.
  *
  * Les clientes dictent en format local, on stocke en format local, l'agent
  * lit en format local — cette conversion est appliquée partout où un numéro
