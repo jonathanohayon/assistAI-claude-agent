@@ -78,6 +78,7 @@ import {
 } from './src/voice-profile.js';
 import { toIsraeliLocal } from './src/phone.js';
 import { postCallEnd, postCampaignResult } from './src/post-call.js';
+import { createCampaignProgressReporter } from './src/campaign-progress.js';
 import { computeCallCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
@@ -179,6 +180,29 @@ export default defineAgent<ProcessUserData>({
     // realtime_server_error, call_ended, etc.) sans avoir à les passer
     // explicitement à chaque appel.
     enterSession({ origin });
+
+    // Outbound campaign: report live call progress (ringing / answered /
+    // ended) to the admin console from the callee's `sip.callStatus`.
+    const campaignProgress =
+      origin.kind === 'campaign'
+        ? createCampaignProgressReporter({
+            campaignId: origin.campaignId,
+            contactId: origin.contactId,
+          })
+        : null;
+    if (campaignProgress) {
+      const isCallee = (p: { identity: string; attributes: Record<string, string> }) =>
+        p.identity.startsWith('callee-') || 'sip.callStatus' in p.attributes;
+      const feed = (p: { identity: string; attributes: Record<string, string> }) => {
+        if (isCallee(p)) campaignProgress.onSipStatus(p.attributes['sip.callStatus']);
+      };
+      for (const [, p] of ctx.room.remoteParticipants) feed(p);
+      ctx.room.on(RoomEvent.ParticipantConnected, feed);
+      ctx.room.on(RoomEvent.ParticipantAttributesChanged, (_changed, p) => feed(p));
+      ctx.room.on(RoomEvent.ParticipantDisconnected, (p) => {
+        if (isCallee(p)) campaignProgress.ended();
+      });
+    }
     const originLabel =
       origin.kind === 'sip'
         ? `${origin.channel === 'whatsapp' ? 'WA' : 'SIP'} ${origin.calledNumber}`
@@ -853,6 +877,7 @@ export default defineAgent<ProcessUserData>({
       // Appel sortant de campagne → résultat vers /api/agent/campaign-result
       // (analyse IA + transition contact côté web), pas le pipeline inbound.
       if (origin.kind === 'campaign') {
+        campaignProgress?.ended();
         await postCampaignResult(
           origin.campaignId,
           origin.contactId,
