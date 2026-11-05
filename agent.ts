@@ -104,12 +104,6 @@ export default defineAgent<ProcessUserData>({
   // Les events OpenAI input_audio_buffer.speech_started / stopped
   // suffisent pour gérer l'interrupt côté agent SDK.
   prewarm: async () => {
-    // Alive signal + hourly model-key checks to the web (founder alerts when
-    // it stops). Once per process.
-    startHeartbeat({
-      agentName: resolveAgentName(),
-      version: process.env['RAILWAY_GIT_COMMIT_SHA']?.slice(0, 7) ?? 'dev',
-    });
     // Fail-fast : valider la clé API Realtime AVANT qu'un appel sonne.
     // Sans clé, chaque appel entrant crasherait au moment de construire le
     // RealtimeModel (client entend du silence puis raccroche). Throw ici =
@@ -1770,6 +1764,14 @@ export default defineAgent<ProcessUserData>({
       await triggerRecap();
     }
   },
+});
+
+// Alive signal + hourly model-key checks to the web (founder alerts when it
+// stops). Once, in the main worker process: job processes, which also import
+// this module, are skipped (src/heartbeat isWorkerMainProcess).
+startHeartbeat({
+  agentName: resolveAgentName(),
+  version: process.env['RAILWAY_GIT_COMMIT_SHA']?.slice(0, 7) ?? 'dev',
 });
 
 cli.runApp(

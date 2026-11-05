@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { checkKeys, keyStateFromStatus } from '../src/heartbeat.js';
+import { checkKeys, isWorkerMainProcess, keyStateFromStatus } from '../src/heartbeat.js';
 
 // status -> key state
 assert.equal(keyStateFromStatus('openai', 200), 'ok');
@@ -9,6 +9,22 @@ assert.equal(keyStateFromStatus('xai', 403), 'invalid');
 assert.equal(keyStateFromStatus('gemini', 400), 'invalid'); // Gemini: bad key = 400
 assert.equal(keyStateFromStatus('openai', 400), 'unreachable');
 assert.equal(keyStateFromStatus('xai', 503), 'unreachable'); // an outage isn't a dead key
+
+// main vs forked job/inference processes (1.9.5 entry scripts)
+assert.equal(isWorkerMainProcess(['node', '/app/agent.ts', 'start']), true);
+assert.equal(
+  isWorkerMainProcess(['node', '/app/node_modules/@livekit/agents/dist/ipc/job_proc_lazy_main.js', '/app/agent.ts']),
+  false,
+);
+assert.equal(
+  isWorkerMainProcess(['node', '/app/node_modules/@livekit/agents/dist/ipc/job_proc_lazy_main.cjs', '/app/agent.ts']),
+  false,
+);
+assert.equal(
+  isWorkerMainProcess(['node', '/app/node_modules/@livekit/agents/dist/ipc/inference_proc_lazy_main.js', '[]']),
+  false,
+);
+assert.equal(isWorkerMainProcess([]), true);
 
 async function main() {
   process.env['OPENAI_API_KEY'] = 'k1';

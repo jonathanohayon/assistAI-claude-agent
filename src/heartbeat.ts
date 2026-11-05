@@ -53,12 +53,25 @@ export async function checkKeys(fetchImpl: typeof fetch = fetch): Promise<Record
   return out;
 }
 
+/**
+ * True in the main worker process only. LiveKit agents (1.9.5) FORKS every job
+ * and inference process from its own entry script (ipc/job_proc_lazy_main.js,
+ * ipc/inference_proc_lazy_main.js) and those import this module too, so code
+ * here would otherwise run once per pooled process, and die with it. The entry
+ * script (argv[1]) tells them apart; process.send isn't reliable under tsx.
+ */
+export function isWorkerMainProcess(argv: readonly string[] = process.argv): boolean {
+  return !/(job|inference)_proc_lazy_main\.(c?js|mjs)$/.test(argv[1] ?? '');
+}
+
 let started = false;
 
-/** Starts the heartbeat once per process (best-effort, never throws). */
+/** Starts the heartbeat ONCE, in the main worker process (best-effort, never throws). */
 export function startHeartbeat(info: { agentName: string; version: string }): void {
-  if (started || !process.env['APP_URL'] || !process.env['INTERNAL_SECRET']) return;
+  if (started || !isWorkerMainProcess()) return;
+  if (!process.env['APP_URL'] || !process.env['INTERNAL_SECRET']) return;
   started = true;
+  console.log(`[heartbeat] started in main worker process pid=${process.pid}`);
   let keys: Record<Provider, KeyState> | undefined;
   let keysAt = 0;
   const beat = async () => {
