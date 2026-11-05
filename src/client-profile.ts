@@ -38,17 +38,23 @@ function dayLabel(iso: string): string {
   }).format(new Date(iso));
 }
 
-/** The single context line ('' = nothing to say). */
+/**
+ * The single context line ('' = nothing to say). Gender-neutral on purpose:
+ * clinics and barbers have male clients too, so the line never presumes a
+ * gender and tells the model to adapt only when it is certain.
+ */
 export function clientProfileLine(p: ClientProfile | null): string {
   if (!p) return '';
   const name = p.name ? ` (prénom sur ses rendez-vous : ${p.name}, à confirmer avant de l'utiliser)` : '';
-  const next = p.nextVisitAt ? ` Elle a déjà un rendez-vous prévu le ${dayLabel(p.nextVisitAt)}.` : '';
+  const next = p.nextVisitAt ? ` Un rendez-vous est déjà prévu le ${dayLabel(p.nextVisitAt)}.` : '';
+  const gender =
+    " Adapte le genre grammatical uniquement si le prénom ou la voix le rend certain.";
   if (p.visits === 0) {
-    return next ? `**CLIENTE CONNUE**${name} :${next}` : '';
+    return next ? `**PERSONNE DÉJÀ CONNUE**${name} :${next}${gender}` : '';
   }
   const last = p.lastVisitAt ? `, dernière visite le ${dayLabel(p.lastVisitAt)}` : '';
   const tone = p.regular
-    ? 'C\'est une habituée : accueille-la chaleureusement comme quelqu\'un que tu connais bien'
-    : 'Elle est déjà venue : tu peux la saluer comme une cliente connue';
-  return `**CLIENTE ${p.regular ? 'FIDÈLE' : 'CONNUE'}**${name} : ${p.visits} visite${p.visits > 1 ? 's' : ''}${last}.${next} ${tone}, sans réciter ces chiffres.`;
+    ? "Cette personne vient régulièrement : accueille-la chaleureusement comme quelqu'un que tu connais bien"
+    : "Cette personne a déjà eu rendez-vous ici : tu peux l'accueillir comme quelqu'un de connu";
+  return `**PERSONNE DÉJÀ CLIENTE${p.regular ? ' (RÉGULIÈRE)' : ''}**${name} : ${p.visits} visite${p.visits > 1 ? 's' : ''}${last}.${next} ${tone}, sans réciter ces chiffres.${gender}`;
 }
