@@ -49,6 +49,8 @@ export interface FetchedConfig {
   voiceProfile?: unknown;
   /** Loyalty v1: caller's visit history with this tenant (null = unknown). See src/client-profile. */
   clientProfile?: import('./client-profile.js').ClientProfile | null;
+  /** Per-tenant call-transfer number (E.164, '' = none), web #152. */
+  transferNumber?: string;
   /**
    * Template per-plan injecté quand `greetingInstructions` est vide.
    * Édité depuis `/admin` par l'admin. Placeholders : `{agent_name}`.

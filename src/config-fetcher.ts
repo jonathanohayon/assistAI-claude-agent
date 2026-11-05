@@ -167,6 +167,7 @@ export async function fetchConfig(
           : 'openai',
       voiceProfile: data.voiceProfile,
       clientProfile: parseClientProfile(data.clientProfile),
+      transferNumber: typeof data.transferNumber === 'string' ? data.transferNumber : '',
       model: data.model ?? REALTIME_CONFIG.model,
       voice: data.voice ?? REALTIME_CONFIG.voice,
       speed: data.speed ?? REALTIME_CONFIG.speed,
