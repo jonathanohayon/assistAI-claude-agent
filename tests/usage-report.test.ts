@@ -59,8 +59,8 @@ assert.equal('provider' in buildUsagePayload(base)!, false);
 
 // forwards the tenant hints only when present
 {
-  const sip = buildUsagePayload({ ...base, toNumber: '+97225551234' })!;
-  assert.equal(sip['toNumber'], '+97225551234');
+  const sip = buildUsagePayload({ ...base, toNumber: '+97220000000' })!;
+  assert.equal(sip['toNumber'], '+97220000000');
   assert.equal('userId' in sip, false);
   const web = buildUsagePayload({ ...base, userId: 'u_1', toNumber: undefined })!;
   assert.equal(web['userId'], 'u_1');

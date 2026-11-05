@@ -39,7 +39,7 @@ export function sipFromOf(p: {
  * Sert à résoudre le tenant via `/api/agent/config?phone=...`.
  *
  * Les appels WhatsApp empruntent le MÊME chemin SIP que les appels PSTN,
- * mais le numéro composé est préfixé `whatsapp:` (ex: `whatsapp:+972237647000`).
+ * mais le numéro composé est préfixé `whatsapp:` (ex: `whatsapp:+97220000000`).
  * On détecte ce préfixe pour poser le `channel` et on retourne :
  *   - `raw`          : la valeur brute de l'attribute (préfixe inclus)
  *   - `channel`      : `'whatsapp'` si préfixé, sinon `'pstn'`
