@@ -17,6 +17,7 @@
 
 import { POST_CALL_TIMEOUT_MS } from './constants.js';
 import type { CallChannel, TranscriptEntry } from './types.js';
+import { currentCallId } from './session-context.js';
 import { webPost } from './web-api.js';
 
 /** Délais avant chaque tentative : immédiat, +1s, +4s. */
@@ -142,6 +143,7 @@ export async function postCallEnd(
   }
 
   const payload = {
+    callId: currentCallId(),
     fromNumber,
     toNumber,
     transcript,
