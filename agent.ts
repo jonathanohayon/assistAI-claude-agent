@@ -81,6 +81,7 @@ import { postCallEnd, postCampaignResult } from './src/post-call.js';
 import { computeCallCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
+import { callIdFromRoomName } from './src/session-context.js';
 import { extractText } from './src/transcript.js';
 import type {
   ProcessUserData,
@@ -178,9 +179,10 @@ export default defineAgent<ProcessUserData>({
     // events qui ne portent pas de toNumber (config_loaded, auto_hangup,
     // realtime_server_error, call_ended, etc.) sans avoir à les passer
     // explicitement à chaque appel.
-    // callId = LiveKit room name (unique per call): stamped on every web
-    // request and event of this call (src/session-context.ts).
-    enterSession({ origin, ...(ctx.room.name ? { callId: ctx.room.name } : {}) });
+    // callId = hash of the LiveKit room name (unique per call; the raw name
+    // embeds the caller's number): stamped on every web request and event
+    // of this call (src/session-context.ts).
+    enterSession({ origin, ...(ctx.room.name ? { callId: callIdFromRoomName(ctx.room.name) } : {}) });
     const originLabel =
       origin.kind === 'sip'
         ? `${origin.channel === 'whatsapp' ? 'WA' : 'SIP'} ${origin.calledNumber}`

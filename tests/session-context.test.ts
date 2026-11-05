@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { currentCallId, enterSession, runWithSession } from '../src/session-context.js';
+import { callIdFromRoomName, currentCallId, enterSession, runWithSession } from '../src/session-context.js';
 
 // web requests made inside a call carry x-call-id; outside a call they don't
 const seen: Array<Record<string, string>> = [];
@@ -62,5 +62,21 @@ await (async () => {
   await Promise.resolve();
   assert.equal(currentCallId(), 'room-E');
 })();
+
+// call id = hash of the room name: SIP room names embed the caller's number
+{
+  const room = 'call-_+972500000000_AbC123xyz'; // mock LiveKit SIP room name
+  const id = callIdFromRoomName(room);
+  assert.match(id, /^[0-9a-f]{16}$/);
+  assert.equal(callIdFromRoomName(room), id, 'stable per call');
+  assert.notEqual(callIdFromRoomName('call-_+972500000001_AbC123xyz'), id);
+  // no digit run from the room name (4+ digits) survives in the id
+  for (const run of room.match(/\d{4,}/g) ?? []) {
+    for (let i = 0; i + 4 <= run.length; i++) {
+      assert.ok(!id.includes(run.slice(i, i + 4)), `id leaks digits ${run.slice(i, i + 4)}`);
+    }
+  }
+  assert.ok(!id.includes('972'), 'no country code');
+}
 
 console.log('ALL SESSION-CONTEXT TESTS PASSED');
