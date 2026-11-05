@@ -66,6 +66,7 @@ import { describeOpenAiKey, resolveOpenAiKey } from './src/openai-key.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { sniffLang } from './src/lang-sniff.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
+import { startHeartbeat } from './src/heartbeat.js';
 import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
 import {
   DEFAULT_VOICE_PROFILE,
@@ -1763,6 +1764,14 @@ export default defineAgent<ProcessUserData>({
       await triggerRecap();
     }
   },
+});
+
+// Alive signal + hourly model-key checks to the web (founder alerts when it
+// stops). Once, in the main worker process: job processes, which also import
+// this module, are skipped (src/heartbeat isWorkerMainProcess).
+startHeartbeat({
+  agentName: resolveAgentName(),
+  version: process.env['RAILWAY_GIT_COMMIT_SHA']?.slice(0, 7) ?? 'dev',
 });
 
 cli.runApp(
