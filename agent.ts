@@ -67,6 +67,7 @@ import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { sniffLang } from './src/lang-sniff.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
+import { clientProfileLine } from './src/client-profile.js';
 import {
   DEFAULT_VOICE_PROFILE,
   mapGemini,
@@ -196,7 +197,11 @@ export default defineAgent<ProcessUserData>({
 
     let cfg: Awaited<ReturnType<typeof fetchConfig>>;
     try {
-      cfg = await fetchConfig(origin);
+      // Caller (From) for the loyalty profile: SIP attrs are there once
+      // detectOrigin resolved; withheld number → no profile.
+      let caller = '';
+      for (const [, p] of ctx.room.remoteParticipants) caller ||= sipFromOf(p);
+      cfg = await fetchConfig(origin, { caller });
     } catch (e) {
       if (!(e instanceof ConfigRefusedError)) throw e;
       // The web refused this call (unknown number, trial over). Never answer
@@ -1413,8 +1418,13 @@ export default defineAgent<ProcessUserData>({
     // Contexte per-call (date/heure Jérusalem + caller-hint substitués dans
     // le template per-plan ou le fallback) — assemblé par
     // src/per-call-context.ts, extrait verbatim de l'inline historique.
-    const { perCallContext: PER_CALL_CONTEXT, callerHintBlock } =
+    const { perCallContext: basePerCallContext, callerHintBlock } =
       buildPerCallContext(localFromNumber, cfg.perCallContextTemplate);
+    // Loyalty v1: one line on a known caller ('' otherwise → unchanged).
+    const loyaltyLine = clientProfileLine(cfg.clientProfile ?? null);
+    const PER_CALL_CONTEXT = loyaltyLine
+      ? `${basePerCallContext}\n\n${loyaltyLine}`
+      : basePerCallContext;
 
     // cfg.instructions vient déjà mergé depuis /api/agent/config — il inclut
     // les directives système (spoken_time, spoken_phone, hangup), la persona

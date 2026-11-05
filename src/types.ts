@@ -47,6 +47,8 @@ export interface FetchedConfig {
   realtimeProvider?: 'openai' | 'gemini' | 'xai';
   /** Voice profile from the web (admin-only); resolved by src/voice-profile. */
   voiceProfile?: unknown;
+  /** Loyalty v1: caller's visit history with this tenant (null = unknown). See src/client-profile. */
+  clientProfile?: import('./client-profile.js').ClientProfile | null;
   /**
    * Template per-plan injecté quand `greetingInstructions` est vide.
    * Édité depuis `/admin` par l'admin. Placeholders : `{agent_name}`.
