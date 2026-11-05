@@ -66,6 +66,7 @@ import { describeOpenAiKey, resolveOpenAiKey } from './src/openai-key.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { sniffLang } from './src/lang-sniff.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
+import { startHeartbeat } from './src/heartbeat.js';
 import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
 import {
   DEFAULT_VOICE_PROFILE,
@@ -103,6 +104,12 @@ export default defineAgent<ProcessUserData>({
   // Les events OpenAI input_audio_buffer.speech_started / stopped
   // suffisent pour gérer l'interrupt côté agent SDK.
   prewarm: async () => {
+    // Alive signal + hourly model-key checks to the web (founder alerts when
+    // it stops). Once per process.
+    startHeartbeat({
+      agentName: resolveAgentName(),
+      version: process.env['RAILWAY_GIT_COMMIT_SHA']?.slice(0, 7) ?? 'dev',
+    });
     // Fail-fast : valider la clé API Realtime AVANT qu'un appel sonne.
     // Sans clé, chaque appel entrant crasherait au moment de construire le
     // RealtimeModel (client entend du silence puis raccroche). Throw ici =
