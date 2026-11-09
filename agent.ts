@@ -68,6 +68,7 @@ import { sniffLang } from './src/lang-sniff.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { startHeartbeat } from './src/heartbeat.js';
 import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
+import { findSipCallerIdentity, transferCall, transferEligible } from './src/transfer.js';
 import {
   DEFAULT_VOICE_PROFILE,
   mapGemini,
@@ -1126,6 +1127,93 @@ export default defineAgent<ProcessUserData>({
     }, 2_000);
 
     // ── end_call tool — exposed to the LLM ──────────────────────────────
+    // ── Call transfer (PSTN only) ──────────────────────────────────────
+    // Tool first, announcement after: the Realtime SDK drops a tool call
+    // that comes in the same response as filler speech, so the model calls
+    // transfer_call, then announces; the REFER starts once that announcement
+    // has played (8 s cap). No number or a failed REFER -> the model apologises
+    // and offers to take a message.
+    const isPstnCall = origin.kind === 'sip' && origin.channel === 'pstn';
+    const canTransfer = transferEligible({
+      originKind: origin.kind,
+      channel: origin.kind === 'sip' ? origin.channel : undefined,
+      transferNumber: cfg.transferNumber,
+    });
+    let transferState: { attempted: boolean; ok?: boolean; error?: string; reason?: string } = {
+      attempted: false,
+    };
+    const waitForAnnouncement = (capMs: number) =>
+      new Promise<void>((resolve) => {
+        let spoke = false;
+        const done = () => {
+          clearTimeout(cap);
+          session.off(voice.AgentSessionEventTypes.AgentStateChanged, onState);
+          resolve();
+        };
+        const onState = (ev: { newState?: string }) => {
+          if (ev.newState === 'speaking') spoke = true;
+          else if (spoke) done();
+        };
+        const cap = setTimeout(done, capMs);
+        session.on(voice.AgentSessionEventTypes.AgentStateChanged, onState);
+      });
+    const transferCallTool = llm.tool({
+      description:
+        "Transfers the caller to a person at the business (the owner or the team). Use it ONLY when the caller explicitly asks to speak to a person, or when you really can't help. Call this tool FIRST, without saying anything before it; its result tells you what to say next. Never call end_call after a transfer.",
+      parameters: z.object({
+        reason: z
+          .string()
+          .nullish()
+          .describe("Short reason: 'caller_asked_for_person', 'cannot_help', 'complaint', 'urgent'."),
+      }),
+      execute: async ({ reason }) => {
+        const why = (reason ?? 'caller_asked_for_person').trim() || 'caller_asked_for_person';
+        if (transferState.attempted) return 'A transfer is already in progress. Say nothing more.';
+        if (!canTransfer) {
+          transferState = { attempted: true, ok: false, error: 'no_transfer_number', reason: why };
+          void remoteLog('agent', 'call_transfer', 'Transfer requested but no transfer number is set', 'info', {
+            ok: false,
+            error: 'no_transfer_number',
+            reason: why,
+          });
+          return "No one can take the call right now. Tell the caller, in one short sentence in their language, that the team isn't available by phone at the moment, and offer to take a message (name, number, reason).";
+        }
+        const identity = findSipCallerIdentity(ctx.room.remoteParticipants.values());
+        transferState = { attempted: true, reason: why };
+        void (async () => {
+          await waitForAnnouncement(8_000);
+          const r = identity
+            ? await transferCall({
+                roomName: ctx.room.name ?? '',
+                participantIdentity: identity,
+                transferNumber: cfg.transferNumber ?? '',
+              })
+            : ({ ok: false, error: 'no_sip_participant' } as const);
+          transferState = r.ok
+            ? { attempted: true, ok: true, reason: why }
+            : { attempted: true, ok: false, error: r.error, reason: why };
+          void remoteLog(
+            'agent',
+            'call_transfer',
+            r.ok ? 'Call transferred to the business' : `Call transfer failed: ${r.error}`,
+            r.ok ? 'info' : 'warn',
+            { ok: r.ok, reason: why, ...(r.ok ? {} : { error: r.error }) },
+          );
+          if (!r.ok) {
+            try {
+              await session.generateReply({
+                instructions:
+                  "The transfer didn't go through. Apologise in one short sentence in the caller's language, say the person isn't available right now, and offer to take a message (name, number, reason).",
+              });
+            } catch {
+              /* best-effort */
+            }
+          }
+        })();
+        return 'Transfer scheduled. Now tell the caller, in ONE short sentence in their language, that you are transferring them to someone from the team. Say nothing else after that.';
+      },
+    });
+
     const endCallTool = llm.tool({
       description:
         "Termine l'appel et raccroche. À appeler UNIQUEMENT dans le MÊME tour de parole où tu viens de dire au revoir À VOIX HAUTE, EN UNE SEULE PHRASE COURTE et DANS LA LANGUE DU CLIENT — et seulement quand la conversation est réellement finie : RDV pris/annulé/déplacé, info donnée et plus rien à demander, le client dit au revoir ou demande à raccrocher, ou silence persistant après une relance. Ne PAS appeler en plein milieu d'un échange ni pendant une simple pause ; si le client reparle pendant que tu conclus, n'appelle PAS end_call et reprends la conversation. Garde le au revoir COURT : un au revoir long ou bavard augmente le risque que ce raccroché soit perdu et que la ligne reste ouverte. APRÈS end_call, NE GÉNÈRE PLUS AUCUNE PAROLE — la ligne se ferme, tout son émis sera coupé.",
@@ -1515,6 +1603,7 @@ export default defineAgent<ProcessUserData>({
         ...businessTools,
         ...knowledgeTools,
         end_call: endCallTool,
+        ...(isPstnCall ? { transfer_call: transferCallTool } : {}),
       },
     });
 
@@ -1698,6 +1787,8 @@ export default defineAgent<ProcessUserData>({
           pricing,
         },
         engine,
+        // Call transfer to the business (PSTN), if the agent attempted one.
+        ...(transferState.attempted ? { transfer: transferState } : {}),
         // Routing context for filtering in /dashboard/logs
         fromNumber,
         toNumber,

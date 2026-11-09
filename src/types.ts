@@ -47,6 +47,8 @@ export interface FetchedConfig {
   realtimeProvider?: 'openai' | 'gemini' | 'xai';
   /** Voice profile from the web (admin-only); resolved by src/voice-profile. */
   voiceProfile?: unknown;
+  /** Per-tenant call-transfer number (E.164, '' = none), web #152. */
+  transferNumber?: string;
   /**
    * Template per-plan injecté quand `greetingInstructions` est vide.
    * Édité depuis `/admin` par l'admin. Placeholders : `{agent_name}`.
