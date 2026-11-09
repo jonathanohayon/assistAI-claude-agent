@@ -85,6 +85,7 @@ import { createCampaignProgressReporter } from './src/campaign-progress.js';
 import { computeCallCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
+import { callIdFromRoomName } from './src/session-context.js';
 import { extractText } from './src/transcript.js';
 import type {
   ProcessUserData,
@@ -182,7 +183,10 @@ export default defineAgent<ProcessUserData>({
     // events qui ne portent pas de toNumber (config_loaded, auto_hangup,
     // realtime_server_error, call_ended, etc.) sans avoir à les passer
     // explicitement à chaque appel.
-    enterSession({ origin });
+    // callId = hash of the LiveKit room name (unique per call; the raw name
+    // embeds the caller's number): stamped on every web request and event
+    // of this call (src/session-context.ts).
+    enterSession({ origin, ...(ctx.room.name ? { callId: callIdFromRoomName(ctx.room.name) } : {}) });
 
     // Outbound campaign: report live call progress (ringing / answered /
     // ended) to the admin console from the callee's `sip.callStatus`.

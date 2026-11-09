@@ -15,46 +15,16 @@
  * de toNumber (config_loaded, auto_hangup, realtime_server_error, etc.)
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { REMOTE_LOG_TIMEOUT_MS } from './constants.js';
+import { currentSession } from './session-context.js';
 import { webPost } from './web-api.js';
 
 type LogLevel = 'info' | 'warn' | 'error';
 
-interface SessionContext {
-  origin?: {
-    kind?: 'sip' | 'web' | 'campaign' | 'outbound_test' | 'unknown';
-    userId?: string;
-    calledNumber?: string;
-    campaignId?: string;
-    contactId?: string;
-    agentId?: string;
-  };
-}
-
-const sessionContext = new AsyncLocalStorage<SessionContext>();
-
-/**
- * Wrap une session worker pour propager `origin` à tous les remoteLog
- * appelés à l'intérieur. À appeler dans entry() une fois origin connu :
- *   await runWithSession({ origin }, async () => { ... rest of entry() ... });
- */
-export function runWithSession<T>(
-  ctx: SessionContext,
-  fn: () => Promise<T>,
-): Promise<T> {
-  return sessionContext.run(ctx, fn);
-}
-
-/**
- * Variante sans callback : set le context pour la suite de la chaîne
- * async courante. Plus pratique que `run()` quand on veut juste enrichir
- * entry() en cours sans tout réécrire dans un closure.
- */
-export function enterSession(ctx: SessionContext): void {
-  sessionContext.enterWith(ctx);
-}
+// Session context moved to src/session-context.ts (shared with web-api.ts);
+// re-exported here so existing imports keep working.
+export { enterSession, runWithSession } from './session-context.js';
 
 /**
  * Push un event structuré au log central.
@@ -76,11 +46,11 @@ export async function remoteLog(
   // déjà un. Permet à lib/logger.ts côté web de résoudre user_id pour les
   // events worker comme config_loaded, auto_hangup, etc. qui n'ont
   // historiquement aucun champ permettant la résolution.
-  const ctx = sessionContext.getStore();
-  const finalMetadata =
-    ctx?.origin && metadata['origin'] === undefined
-      ? { ...metadata, origin: ctx.origin }
-      : metadata;
+  const ctx = currentSession();
+  const finalMetadata: Record<string, unknown> = { ...metadata };
+  if (ctx?.origin && finalMetadata['origin'] === undefined) finalMetadata['origin'] = ctx.origin;
+  // Call id → the web ties this event (e.g. call_transfer) to its call.
+  if (ctx?.callId && finalMetadata['callId'] === undefined) finalMetadata['callId'] = ctx.callId;
 
   // Toujours mirror localement pour qu'on voie les logs même si l'API
   // distante est down. Format compact pour lisibilité dans Railway logs.

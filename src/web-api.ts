@@ -18,6 +18,8 @@
  * API métier).
  */
 
+import { currentCallId } from './session-context.js';
+
 interface WebEnv {
   appUrl: string;
   secret: string;
@@ -41,6 +43,12 @@ function webEnv(): WebEnv {
   }
   cachedEnv = { appUrl, secret };
   return cachedEnv;
+}
+
+/** `x-call-id` for requests made inside a call (see src/session-context.ts). */
+function callIdHeader(): Record<string, string> {
+  const id = currentCallId();
+  return id ? { 'x-call-id': id } : {};
 }
 
 export interface WebApiOpts {
@@ -69,6 +77,7 @@ export async function webPost(
     headers: {
       'Content-Type': 'application/json',
       'x-internal-secret': secret,
+      ...callIdHeader(),
       ...(opts.headers ?? {}),
     },
     body: JSON.stringify(body),
@@ -91,6 +100,7 @@ export async function webGet(
     method: 'GET',
     headers: {
       'x-internal-secret': secret,
+      ...callIdHeader(),
       ...(opts.headers ?? {}),
     },
     signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
