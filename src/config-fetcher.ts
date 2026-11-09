@@ -33,6 +33,7 @@ import {
 } from './config-refusal.js';
 import { fetchVoxConfigByPhone, voxInstructions } from './vox-config.js';
 import { webGet } from './web-api.js';
+import { parseClientProfile } from './client-profile.js';
 
 /**
  * Permissif par défaut — si le fetch échoue ou si l'admin n'a pas encore
@@ -80,6 +81,7 @@ export function defaultConfig(): FetchedConfig {
  */
 export async function fetchConfig(
   origin: SessionOrigin,
+  opts: { caller?: string } = {},
 ): Promise<FetchedConfig> {
   // ── Tamara d'abord, pour les numéros qui lui appartiennent ───────────
   // La voix se règle désormais côté Tamara : un agent est un cerveau texte et
@@ -130,7 +132,9 @@ export async function fetchConfig(
     // Le header x-internal-secret est posé par webGet pour tous.
     const path =
       origin.kind === 'sip'
-        ? `/api/agent/config?phone=${encodeURIComponent(origin.calledNumber)}`
+        ? `/api/agent/config?phone=${encodeURIComponent(origin.calledNumber)}${
+            opts.caller ? `&caller=${encodeURIComponent(opts.caller)}` : ''
+          }`
         : origin.kind === 'web'
           ? `/api/agent/config?userId=${encodeURIComponent(origin.userId)}`
           : origin.kind === 'campaign'
@@ -162,6 +166,7 @@ export async function fetchConfig(
           ? data.realtimeProvider
           : 'openai',
       voiceProfile: data.voiceProfile,
+      clientProfile: parseClientProfile(data.clientProfile),
       transferNumber: typeof data.transferNumber === 'string' ? data.transferNumber : '',
       model: data.model ?? REALTIME_CONFIG.model,
       voice: data.voice ?? REALTIME_CONFIG.voice,

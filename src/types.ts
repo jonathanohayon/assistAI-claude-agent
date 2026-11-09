@@ -47,6 +47,8 @@ export interface FetchedConfig {
   realtimeProvider?: 'openai' | 'gemini' | 'xai';
   /** Voice profile from the web (admin-only); resolved by src/voice-profile. */
   voiceProfile?: unknown;
+  /** Loyalty v1: caller's visit history with this tenant (null = unknown). See src/client-profile. */
+  clientProfile?: import('./client-profile.js').ClientProfile | null;
   /** Per-tenant call-transfer number (E.164, '' = none), web #152. */
   transferNumber?: string;
   /**
