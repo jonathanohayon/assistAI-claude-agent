@@ -85,7 +85,7 @@ import { createCampaignProgressReporter } from './src/campaign-progress.js';
 import { computeCallCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
-import { callIdFromRoomName } from './src/session-context.js';
+import { callIdFromRoomName, currentCallId } from './src/session-context.js';
 import { extractText } from './src/transcript.js';
 import type {
   ProcessUserData,
@@ -93,6 +93,8 @@ import type {
 } from './src/types.js';
 import { makeBusinessTools } from './tools/business.js';
 import { makeCalendarTools } from './tools/calendar.js';
+import { makeClientAgentTools } from './tools/client-agent.js';
+import { isVoxToolCall } from './src/client-agent.js';
 import { makeKnowledgeTools } from './tools/knowledge.js';
 import { makeOrdersTools } from './tools/orders.js';
 
@@ -252,7 +254,14 @@ export default defineAgent<ProcessUserData>({
     // d'être le cerveau : il transcrit et il parle, et chaque tour part vers
     // le endpoint du client. Absent → comportement historique intact.
     const agentWebhook = cfg.agentWebhook;
-    const webhookMode = Boolean(agentWebhook?.url);
+    // tamaravox tool mode (src/client-agent.ts): Tamara stays the brain and
+    // the client's agent is the ask_client_agent tool. Only for tamaravox
+    // configs; then the legacy verbatim mode below is OFF for this call.
+    const voxToolMode = isVoxToolCall(cfg);
+    const webhookMode = Boolean(agentWebhook?.url) && !voxToolMode;
+    if (voxToolMode) {
+      console.log(`[client_agent] tool mode → ${agentWebhook!.url}`);
+    }
     if (webhookMode) {
       console.log(`[webhook_agent] mode actif → ${agentWebhook!.url}`);
     }
@@ -1592,6 +1601,63 @@ export default defineAgent<ProcessUserData>({
     //     du chatCtx comme system message.
     //   - greetingInstructions : phrase d'accueil littérale.
     // Loggé une seule fois par session — taille typique 8-12kB metadata.
+    // tamaravox tool mode only: aitamara calls get no extra tool.
+    const clientAgentTools =
+      voxToolMode && agentWebhook
+        ? makeClientAgentTools({
+            webhook: agentWebhook,
+            getCallId: () => currentCallId() ?? 'call',
+            getLanguage: () => {
+              const lastUser = [...transcript].reverse().find((t) => t.role === 'user');
+              return lastUser && sniffLang(lastUser.text) === 'he' ? 'he' : (cfg.primaryLanguage ?? 'en');
+            },
+            getCallerSaid: () => [...transcript].reverse().find((t) => t.role === 'user')?.text ?? '',
+            getHistory: () =>
+              transcript.map((t) => ({ role: t.role === 'assistant' ? ('agent' as const) : ('user' as const), text: t.text })),
+            startStall: () => {
+              // Holding line only with a TTS engine: session.say needs real
+              // audio on a Realtime session, and generateReply mid-tool would
+              // start a competing response.
+              const tts = getTtsEngine();
+              if (!tts) {
+                console.log('[client_agent] holding line skipped: no TTS engine');
+                return null;
+              }
+              let cancelled = false;
+              let handle: { interrupt: () => void } | null = null;
+              const line = stallLine(cfg.primaryLanguage ?? 'en');
+              void tts
+                .speak(line, { voice: cfg.voice, language: cfg.primaryLanguage ?? 'en', ...(cfg.speed ? { speed: cfg.speed } : {}) })
+                .then((audio) => {
+                  if (cancelled) return;
+                  handle = session.say(line, { audio, addToChatCtx: false });
+                })
+                .catch((e) => console.warn(`[client_agent] holding line failed: ${(e as Error).message}`));
+              return () => {
+                cancelled = true;
+                try {
+                  handle?.interrupt();
+                } catch {
+                  /* already played */
+                }
+              };
+            },
+            onResult: (r) =>
+              reportTurn({
+                agentId: cfg.voxAgentId ?? '',
+                callId: currentCallId() ?? 'call',
+                turnId: r.turnId,
+                elapsedMs: r.elapsedMs,
+                ok: Boolean(r.answer),
+                ...(r.failure ? { failure: r.failure } : {}),
+                ...(r.status ? { status: r.status } : {}),
+                language: r.language,
+                transcript: r.callerSaid || r.question,
+                ...(r.answer ? { reply: r.answer } : {}),
+              }),
+          })
+        : {};
+
     void remoteLog(
       'agent',
       'chatctx_snapshot',
@@ -1621,6 +1687,7 @@ export default defineAgent<ProcessUserData>({
           ...(cfg.ordersEnabled ? ['record_order'] : []),
           ...businessNames,
           ...knowledgeNames,
+          ...Object.keys(clientAgentTools),
           'end_call',
         ],
       },
@@ -1643,6 +1710,7 @@ export default defineAgent<ProcessUserData>({
         ...knowledgeTools,
         end_call: endCallTool,
         ...(isPstnCall ? { transfer_call: transferCallTool } : {}),
+        ...clientAgentTools,
       },
     });
 
