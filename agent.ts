@@ -1609,7 +1609,6 @@ export default defineAgent<ProcessUserData>({
         toolsRegistered: [
           ...(cfg.features.calendar !== false
             ? [
-                'list_available_dates',
                 'check_availability',
                 'book_appointment',
                 'save_contact',

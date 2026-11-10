@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { webPost } from '../src/web-api.js';
 
 export interface ToolFeatures {
-  /** Calendar tools : list_available_dates, check_availability, book_appointment,
+  /** Calendar tools : check_availability, book_appointment,
    *  find_appointment, cancel_appointment, reschedule_appointment. */
   calendar?: boolean;
   /** CRM tools : save_contact + auto-save dans book_appointment. */
@@ -63,100 +63,55 @@ const makePost =
     return (await res.json()) as T;
   };
 
-// Centers a tenant operates (current = Prestige). Each day of the week is
-// bound to ONE centre on the server side — this enum is exposed to the LLM
-// so it commits to a centre when querying or booking.
-const CENTER_ENUM = z.enum(['jerusalem', 'ashdod', 'natanya']);
-
-type SuggestedDate = { date: string; weekday: string };
-
-const formatSuggested = (suggested?: SuggestedDate[]): string =>
-  suggested && suggested.length > 0
-    ? suggested.map((d) => `${d.weekday} ${d.date}`).join(', ')
-    : '';
+// The place of an appointment is FREE TEXT the agent takes from the
+// tenant's own company sheet (locations + "location rules" in its
+// instructions). No business rule lives in these descriptions: each tenant's
+// days, places and durations come from its data. Sending the `location` key
+// (even null) tells the web routes to apply no weekday rule.
+const LOCATION_PARAM = z
+  .string()
+  .nullish()
+  .describe(
+    "Établissement du rendez-vous, tel qu'il est nommé dans tes consignes (fiche de l'entreprise). Laisse vide si l'entreprise n'a qu'un seul lieu.",
+  );
+const DURATION_HELP =
+  "Durée de la prestation en minutes, telle qu'indiquée dans les prestations de l'entreprise (défaut 30).";
 
 export const makeCalendarTools = (ctx: ToolContext) => {
   const post = makePost(ctx);
 
-  const listAvailableDates = llm.tool({
-    description:
-      "Renvoie les prochaines dates valides pour un centre donné — déterministe, source de vérité. À APPELER systématiquement avant de proposer une date à la cliente : NE devine JAMAIS quel jour de la semaine correspond à quel centre, demande ce tool. Utile aussi quand la cliente dit 'je veux Jérusalem la semaine prochaine' → tu obtiens directement les dates ouvertes.",
-    parameters: z.object({
-      center: CENTER_ENUM.describe("Centre voulu par la cliente (jerusalem, ashdod, natanya)."),
-      count: z.number().int().nullish().describe("Combien de prochaines dates retourner (défaut 3, max 10)."),
-      after: z.string().nullish().describe("Optionnel : YYYY-MM-DD à partir de laquelle chercher (exclusif). Sinon, à partir d'aujourd'hui."),
-    }),
-    execute: async ({ center, count, after }) => {
-      const data = await post<{
-        center: string;
-        label: string;
-        dates: SuggestedDate[];
-        error?: string;
-      }>('/api/calendar/list-dates', {
-        center,
-        count: count ?? 3,
-        after: after ?? undefined,
-      });
-      if (data.error) return `Erreur : ${data.error}`;
-      const dates = data.dates ?? [];
-      if (dates.length === 0) return `Aucune date trouvée pour ${data.label}.`;
-      return `Prochaines dates ouvertes à ${data.label} : ${formatSuggested(dates)}.`;
-    },
-  });
-
   const checkAvailability = llm.tool({
     description:
-      "Vérifie les créneaux disponibles pour une date + centre précis. PASSE la durée de la prestation (60 pour soin de la peau, 30 pour épilation) : un créneau n'est renvoyé que si la prestation ENTIÈRE y tient sans chevauchement. Si la date ne matche pas le centre, l'API renvoie suggested_dates avec les prochaines dates valides — utilise-les directement. Si tu ne sais pas quelle date proposer, appelle d'abord list_available_dates(center).",
+      "Vérifie les créneaux disponibles pour une date. PASSE la durée de la prestation : un créneau n'est renvoyé que si la prestation ENTIÈRE y tient sans chevauchement. Si l'entreprise a plusieurs établissements, passe celui voulu et respecte AVANT d'appeler les règles par établissement et par jour de tes consignes.",
     parameters: z.object({
       date: z.string().describe("Date au format YYYY-MM-DD (ex: 2026-05-12)."),
-      center: CENTER_ENUM.nullish().describe(
-        "Centre demandé par la cliente. Optionnel — laisse vide pour laisser l'API déterminer le centre du jour.",
-      ),
-      duration: z
-        .number()
-        .int()
-        .nullish()
-        .describe("Durée de la prestation en minutes (60 soin de la peau, 30 épilation, défaut 30). Indispensable pour que les créneaux renvoyés tiennent vraiment."),
+      location: LOCATION_PARAM,
+      duration: z.number().int().nullish().describe(`${DURATION_HELP} Indispensable pour que les créneaux renvoyés tiennent vraiment.`),
     }),
-    execute: async ({ date, center, duration }) => {
+    execute: async ({ date, location, duration }) => {
       const data = await post<{
         date: string;
-        center?: string;
-        label?: string;
+        location?: string | null;
         available_slots?: string[];
         reason?: string;
         error?: string;
-        message?: string;
-        suggested_dates?: SuggestedDate[];
-        open_label_that_day?: string;
-        requested_center?: string;
       }>('/api/calendar/availability', {
         date,
-        center: center ?? undefined,
+        location: location ?? null,
         duration: duration ?? 30,
       });
-      // Wrong day for requested center → server already gave us the next
-      // valid dates for that center. Surface them to the LLM verbatim.
-      if (data.error === 'wrong_day_for_center') {
-        return `${data.message} Propose une de ces dates à la cliente.`;
-      }
-      // No slots left on this date → server gave us the next valid dates
-      // for the SAME center.
-      if (data.reason && data.suggested_dates) {
-        return `${data.reason}`;
-      }
-      if (data.reason) {
-        return `${data.reason} Veux-tu un créneau à ${data.label} le ${date} ?`;
-      }
+      if (data.error) return `Erreur : ${data.error}`;
+      if (data.reason) return data.reason;
+      const at = data.location ? ` (${data.location})` : '';
       const slots = data.available_slots ?? [];
-      if (slots.length === 0) return `Aucun créneau disponible le ${date} à ${data.label}.`;
-      return `Le ${date} (centre ${data.label}), créneaux libres : ${slots.join(', ')}`;
+      if (slots.length === 0) return `Aucun créneau disponible le ${date}${at}.`;
+      return `Le ${date}${at}, créneaux libres : ${slots.join(', ')}`;
     },
   });
 
   const bookAppointment = llm.tool({
     description:
-      "Réserve un rendez-vous dans Google Calendar. AVANT d'appeler : prénom, date, heure, prestation, et déduis le centre depuis la date (LUNDI=Ashdod, MERCREDI=Natanya, autres jours=Jérusalem). Le téléphone est OPTIONNEL — par défaut on prend le numéro de l'appelant (caller ID Twilio). Ne demande JAMAIS le téléphone si tu n'as pas besoin de le récupérer manuellement.",
+      "Réserve un rendez-vous dans Google Calendar. AVANT d'appeler : prénom, date, heure, prestation, et — si l'entreprise a plusieurs établissements — l'établissement, en respectant les règles par établissement et par jour de tes consignes. Le téléphone est OPTIONNEL — par défaut on prend le numéro de l'appelant (caller ID Twilio). Ne demande JAMAIS le téléphone si tu n'as pas besoin de le récupérer manuellement.",
     parameters: z.object({
       name: z.string().describe("Nom complet du client."),
       phone: z
@@ -167,18 +122,16 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         ),
       date: z.string().describe("Date au format YYYY-MM-DD."),
       time: z.string().describe("Heure au format HH:MM (24h)."),
-      center: CENTER_ENUM.describe(
-        "Centre obligatoire — déduis-le du jour de la semaine : LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem.",
-      ),
-      description: z.string().nullish().describe("Objet du rendez-vous (ex: 'soin du visage', 'épilation')."),
+      location: LOCATION_PARAM,
+      description: z.string().nullish().describe("Objet du rendez-vous : la prestation demandée, telle que nommée dans les prestations de l'entreprise."),
       email: z.string().nullish().describe("Email du client (optionnel)."),
       duration: z
         .number()
         .int()
         .nullish()
-        .describe("Durée en minutes (60 pour soins de la peau, 30 pour épilation, défaut 30)."),
+        .describe(DURATION_HELP),
     }),
-    execute: async ({ name, phone, date, time, center, description, email, duration }) => {
+    execute: async ({ name, phone, date, time, location, description, email, duration }) => {
       // Fallback caller-ID si le LLM ne fournit pas phone. Évite que
       // l'agent demande au client un numéro déjà connu via Twilio.
       const resolvedPhone =
@@ -193,25 +146,17 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         summary?: string;
         error?: string;
         message?: string;
-        expectedLabel?: string;
-        suggested_dates?: SuggestedDate[];
       }>('/api/calendar/book', {
         name,
         phone: resolvedPhone,
         date,
         time,
-        center,
+        location: location ?? null,
         description: description ?? undefined,
         email: email ?? undefined,
         duration: duration ?? 30,
       });
       if (!data.success) {
-        // Wrong center for the day → server gave us next valid dates for
-        // the requested center. Hand them back so the LLM can re-propose.
-        if (data.error === 'wrong_day_for_center') {
-          const next = formatSuggested(data.suggested_dates);
-          return `${data.message ?? data.error}${next ? ` Propose plutôt : ${next}.` : ''}`;
-        }
         // Overlap with an existing booking — REFUSÉ côté serveur. Le message
         // contient déjà les créneaux libres : propose-les, ne réessaie jamais
         // la même heure.
@@ -220,9 +165,6 @@ export const makeCalendarTools = (ctx: ToolContext) => {
             data.message ??
             "Ce créneau chevauche un rendez-vous existant. Propose une autre heure."
           );
-        }
-        if (data.expectedLabel) {
-          return `${data.error} (Le bon centre pour le ${date} est ${data.expectedLabel}.)`;
         }
         return `Erreur réservation : ${data.error ?? 'inconnue'}`;
       }
@@ -314,36 +256,27 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const rescheduleAppointment = llm.tool({
     description:
-      "Déplace un rendez-vous existant à une nouvelle date/heure. Utilise l'eventId de find_appointment. Déduis le centre de la NOUVELLE date (LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem) — déplacer vers un autre jour peut changer de centre.",
+      "Déplace un rendez-vous existant à une nouvelle date/heure. Utilise l'eventId de find_appointment. Si l'entreprise a plusieurs établissements, respecte pour la NOUVELLE date les règles par établissement et par jour de tes consignes.",
     parameters: z.object({
       event_id: z.string().describe("Identifiant Google Calendar de l'événement."),
       new_date: z.string().describe("Nouvelle date (YYYY-MM-DD)."),
       new_time: z.string().describe("Nouvelle heure (HH:MM, 24h)."),
-      center: CENTER_ENUM.nullish().describe(
-        "Centre attendu pour la nouvelle date — déduis-le du jour (LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem). Optionnel : laisse vide pour laisser l'API calculer.",
-      ),
+      location: LOCATION_PARAM,
       duration: z.number().int().nullish().describe("Durée en minutes. Si omis, garde la durée actuelle."),
     }),
-    execute: async ({ event_id, new_date, new_time, center, duration }) => {
+    execute: async ({ event_id, new_date, new_time, location, duration }) => {
       const data = await post<{
         success?: boolean;
         summary?: string;
         error?: string;
         message?: string;
-        expectedLabel?: string;
-        suggested_dates?: SuggestedDate[];
       }>('/api/calendar/reschedule', {
         eventId: event_id,
         newDate: new_date,
         newTime: new_time,
-        center: center ?? undefined,
+        location: location ?? null,
         duration: duration ?? undefined,
       });
-      // Mauvais centre pour le jour → l'API renvoie les prochaines dates valides.
-      if (data.error === 'wrong_day_for_center') {
-        const next = formatSuggested(data.suggested_dates);
-        return `${data.message ?? data.error}${next ? ` Propose plutôt : ${next}.` : ''}`;
-      }
       // Overlap refusé côté serveur : le message liste les créneaux libres.
       if (data.error === 'slot_conflict') {
         return (
@@ -395,7 +328,6 @@ export const makeCalendarTools = (ctx: ToolContext) => {
   return {
     ...(calendarEnabled
       ? {
-          list_available_dates: listAvailableDates,
           check_availability: checkAvailability,
           book_appointment: bookAppointment,
           find_appointment: findAppointment,
