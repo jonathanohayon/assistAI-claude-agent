@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { REALTIME_CONFIG } from '../config.js';
 import { DEFAULT_NOISE_REDUCTION_LEVEL } from './constants.js';
 import type { RealtimeProvider } from './realtime-provider.js';
+import { resolveVoiceProfile } from './voice-profile.js';
 
 interface ContractJson {
   version: number;
@@ -110,8 +111,35 @@ export function engineFromVoiceConfig(vc: unknown): EngineSettings | null {
   };
 }
 
-/** The one entry point: voiceConfig when valid, legacy fields otherwise. */
-export function resolveEngineSettings(data: Record<string, unknown>): EngineSettings & { source: 'voiceConfig' | 'legacy' } {
+/** Keys whose values differ between two engine settings (deep compare). */
+export function engineMismatch(a: EngineSettings, b: EngineSettings): string[] {
+  const keys: Array<keyof EngineSettings> = ['realtimeProvider', 'model', 'voice', 'speed', 'noiseReductionLevel', 'voiceProfile'];
+  const canon = (v: unknown) =>
+    JSON.stringify(v, (_k, x) =>
+      x && typeof x === 'object' && !Array.isArray(x)
+        ? Object.fromEntries(Object.entries(x).sort(([p], [q]) => p.localeCompare(q)))
+        : x,
+    );
+  // Profiles are compared as the worker uses them (resolved): an outbound
+  // payload has no legacy profile, which resolves to the defaults.
+  const norm = (e: EngineSettings) => ({ ...e, voiceProfile: resolveVoiceProfile(e.voiceProfile) });
+  const na = norm(a);
+  const nb = norm(b);
+  return keys.filter((k) => canon(na[k]) !== canon(nb[k]));
+}
+
+/**
+ * The one entry point: voiceConfig when valid, legacy fields otherwise.
+ * Shadow compare: when voiceConfig is the source and the payload ALSO has
+ * the legacy fields, any difference is reported in `mismatch` (and logged by
+ * the caller), so drift between the two shows up on real calls.
+ */
+export function resolveEngineSettings(
+  data: Record<string, unknown>,
+): EngineSettings & { source: 'voiceConfig' | 'legacy'; mismatch: string[] } {
   const fromContract = engineFromVoiceConfig(data['voiceConfig']);
-  return fromContract ? { ...fromContract, source: 'voiceConfig' } : { ...engineFromLegacy(data), source: 'legacy' };
+  if (!fromContract) return { ...engineFromLegacy(data), source: 'legacy', mismatch: [] };
+  const hasLegacy = 'voice' in data || 'model' in data || 'speed' in data;
+  const legacy = engineFromLegacy(data);
+  return { ...fromContract, source: 'voiceConfig', mismatch: hasLegacy ? engineMismatch(fromContract, legacy) : [] };
 }

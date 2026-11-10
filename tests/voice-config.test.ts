@@ -57,6 +57,7 @@ for (const [name, p] of Object.entries(payloads)) {
   const fromContract = engineFromVoiceConfig(p['voiceConfig']);
   assert.ok(fromContract, `${name}: voiceConfig is a valid v1`);
   assert.equal(resolveEngineSettings(p).source, 'voiceConfig', `${name}: contract wins`);
+  assert.deepEqual(resolveEngineSettings(p).mismatch, [], `${name}: shadow compare finds no drift`);
   const { voiceConfig: _vc, ...legacyOnly } = p;
   assert.equal(resolveEngineSettings(legacyOnly).source, 'legacy', `${name}: legacy fallback`);
   assert.deepEqual(
@@ -69,6 +70,14 @@ for (const [name, p] of Object.entries(payloads)) {
 assert.equal(engineFromVoiceConfig(payloads['inboundProfile']!['voiceConfig'])!.realtimeProvider, 'xai');
 assert.equal(engineFromVoiceConfig(payloads['campaignSliders']!['voiceConfig'])!.speed, 1.167);
 
+// shadow compare reports a real drift between voiceConfig and the legacy fields
+{
+  const p = payloads['inboundProfile']!;
+  assert.deepEqual(resolveEngineSettings({ ...p, speed: 1.2 }).mismatch, ['speed']);
+  assert.deepEqual(resolveEngineSettings({ ...p, voice: 'ash', realtimeProvider: 'openai' }).mismatch, ['realtimeProvider', 'voice']);
+  assert.deepEqual(resolveEngineSettings({ voiceConfig: p['voiceConfig'] }).mismatch, [], 'no legacy fields → nothing to compare');
+}
+
 // invalid / foreign voiceConfig → legacy path, as before
 for (const bad of [null, 'x', {}, { version: 2 }, { version: 1, voiceId: 'marin', engine: 'gpt', advanced: {} }, { version: 1, voiceId: '', engine: 'auto', advanced: {} }]) {
   assert.equal(engineFromVoiceConfig(bad), null);
@@ -76,7 +85,8 @@ for (const bad of [null, 'x', {}, { version: 2 }, { version: 1, voiceId: 'marin'
 }
 // an old web (no voiceConfig): exactly the legacy defaults
 {
-  const { source, ...rest } = resolveEngineSettings({});
+  const { source, mismatch, ...rest } = resolveEngineSettings({});
+  assert.deepEqual(mismatch, []);
   assert.equal(source, 'legacy');
   assert.deepEqual(rest, engineFromLegacy({}));
 }
@@ -116,10 +126,14 @@ for (const id of Object.keys(VOICE_CONTRACT.voiceGender)) {
     assert.equal(mine, readFileSync(local, 'utf8'), 'src/voice/contract.json differs from the web copy');
   } else if (process.env['VOICE_CONTRACT_OFFLINE'] !== '1') {
     const url = 'https://raw.githubusercontent.com/jonathanohayon/assistAI-claude/main/lib/voice/contract.json';
-    const res = await fetch(url).catch(() => null);
-    if (!res) throw new Error(`could not fetch the web contract (${url}); set VOICE_CONTRACT_OFFLINE=1 to skip offline`);
-    assert.equal(res.status, 200, `web contract not on web main yet (${res.status}): merge web #185 first`);
-    assert.equal(mine, await res.text(), 'src/voice/contract.json differs from web main lib/voice/contract.json — re-vendor it');
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) }).catch(() => null);
+    if (!res || res.status >= 500) {
+      // Offline / GitHub down: skip loudly; a REAL difference still fails below.
+      console.warn(`[voice-config.test] WARNING: web contract unreachable (${res?.status ?? 'network'}), drift not checked`);
+    } else {
+      assert.equal(res.status, 200, `web contract not on web main (${res.status})`);
+      assert.equal(mine, await res.text(), 'src/voice/contract.json differs from web main lib/voice/contract.json — re-vendor it');
+    }
   } else {
     console.warn('[voice-config.test] VOICE_CONTRACT_OFFLINE=1: web copy not compared');
   }

@@ -161,6 +161,9 @@ export async function fetchConfig(
     const data = (await res.json()) as Partial<FetchedConfig>;
     const engine = resolveEngineSettings(data as Record<string, unknown>);
     console.log(`[config] voice settings from ${engine.source}`);
+    if (engine.mismatch.length) {
+      console.warn(`[config] voice mismatch ${engine.mismatch.join(',')}`);
+    }
 
     return {
       instructions: data.instructions ?? FALLBACK_INSTRUCTIONS,
