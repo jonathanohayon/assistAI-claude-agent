@@ -1,0 +1,326 @@
+{
+  "version": 1,
+  "voiceGender": {
+    "marin": "f",
+    "cedar": "m",
+    "ballad": "m",
+    "sage": "f",
+    "verse": "m",
+    "alloy": "m",
+    "shimmer": "f",
+    "echo": "m",
+    "fable": "m",
+    "onyx": "m",
+    "nova": "f",
+    "coral": "f",
+    "ash": "m"
+  },
+  "defaultVoiceId": "marin",
+  "styles": [
+    "warm",
+    "professional",
+    "dynamic",
+    "calm"
+  ],
+  "defaultStyle": "warm",
+  "engines": [
+    "auto",
+    "openai",
+    "gemini",
+    "xai"
+  ],
+  "fieldLevel": {
+    "voiceId": 1,
+    "style": 1,
+    "pace": 2,
+    "patience": 2,
+    "bargeIn": 2,
+    "keyTerms": 2,
+    "pronunciations": 2,
+    "noiseReduction": 2,
+    "languageLock": 2,
+    "engine": 3,
+    "advanced": 3
+  },
+  "defaultVoice": {
+    "version": 1,
+    "voiceId": "marin",
+    "style": "warm",
+    "pace": "normal",
+    "patience": 3,
+    "bargeIn": true,
+    "keyTerms": [],
+    "pronunciations": [],
+    "noiseReduction": 8,
+    "languageLock": false,
+    "engine": "auto",
+    "advanced": {
+      "speed": null,
+      "model": null,
+      "languageHint": "auto",
+      "voiceOverrides": {},
+      "minInterruptionMs": 500,
+      "idleHangupSec": 30,
+      "maxDurationMin": 30,
+      "fillers": true,
+      "speakingStyle": "",
+      "openaiTurnMode": "server_vad",
+      "openaiEagerness": "auto",
+      "openaiNoiseReduction": "off",
+      "openaiReasoning": "default",
+      "grokReasoning": "high"
+    }
+  },
+  "examples": [
+    {
+      "voice": {
+        "version": 1,
+        "voiceId": "marin",
+        "style": "warm",
+        "pace": "normal",
+        "patience": 3,
+        "bargeIn": true,
+        "keyTerms": [],
+        "pronunciations": [],
+        "noiseReduction": 8,
+        "languageLock": false,
+        "engine": "auto",
+        "advanced": {
+          "speed": null,
+          "model": "gpt-realtime-2",
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "fillers": true,
+          "speakingStyle": "",
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      },
+      "engine": {
+        "realtimeProvider": "openai",
+        "model": "gpt-realtime-2",
+        "voice": "marin",
+        "speed": 1,
+        "noiseReductionLevel": 8,
+        "voiceProfile": {
+          "turnSensitivity": 3,
+          "bargeIn": true,
+          "keyTerms": [],
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "pace": "normal",
+          "pronunciations": [],
+          "fillers": true,
+          "speakingStyle": "",
+          "languageLock": false,
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      }
+    },
+    {
+      "voice": {
+        "version": 1,
+        "voiceId": "cedar",
+        "style": "warm",
+        "pace": "fast",
+        "patience": 2,
+        "bargeIn": false,
+        "keyTerms": [
+          "Mock"
+        ],
+        "pronunciations": [],
+        "noiseReduction": 6,
+        "languageLock": false,
+        "engine": "xai",
+        "advanced": {
+          "speed": 1.13,
+          "model": "gpt-realtime-2.1",
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "fillers": true,
+          "speakingStyle": "",
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "none"
+        }
+      },
+      "engine": {
+        "realtimeProvider": "xai",
+        "model": "gpt-realtime-2.1",
+        "voice": "cedar",
+        "speed": 1.13,
+        "noiseReductionLevel": 6,
+        "voiceProfile": {
+          "turnSensitivity": 2,
+          "bargeIn": false,
+          "keyTerms": [
+            "Mock"
+          ],
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "pace": "fast",
+          "pronunciations": [],
+          "fillers": true,
+          "speakingStyle": "",
+          "languageLock": false,
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "none"
+        }
+      }
+    },
+    {
+      "voice": {
+        "version": 1,
+        "voiceId": "sage",
+        "style": "warm",
+        "pace": "slow",
+        "patience": 5,
+        "bargeIn": true,
+        "keyTerms": [],
+        "pronunciations": [
+          {
+            "term": "Mock",
+            "sayAs": "mok"
+          }
+        ],
+        "noiseReduction": 10,
+        "languageLock": true,
+        "engine": "gemini",
+        "advanced": {
+          "speed": 0.9,
+          "model": "gpt-realtime-2",
+          "languageHint": "he",
+          "voiceOverrides": {
+            "gemini": "Kore"
+          },
+          "minInterruptionMs": 800,
+          "idleHangupSec": 45,
+          "maxDurationMin": 20,
+          "fillers": false,
+          "speakingStyle": "brief",
+          "openaiTurnMode": "semantic_vad",
+          "openaiEagerness": "low",
+          "openaiNoiseReduction": "far_field",
+          "openaiReasoning": "medium",
+          "grokReasoning": "high"
+        }
+      },
+      "engine": {
+        "realtimeProvider": "gemini",
+        "model": "gpt-realtime-2",
+        "voice": "sage",
+        "speed": 0.9,
+        "noiseReductionLevel": 10,
+        "voiceProfile": {
+          "turnSensitivity": 5,
+          "bargeIn": true,
+          "keyTerms": [],
+          "languageHint": "he",
+          "voiceOverrides": {
+            "gemini": "Kore"
+          },
+          "minInterruptionMs": 800,
+          "idleHangupSec": 45,
+          "maxDurationMin": 20,
+          "pace": "slow",
+          "pronunciations": [
+            {
+              "term": "Mock",
+              "sayAs": "mok"
+            }
+          ],
+          "fillers": false,
+          "speakingStyle": "brief",
+          "languageLock": true,
+          "openaiTurnMode": "semantic_vad",
+          "openaiEagerness": "low",
+          "openaiNoiseReduction": "far_field",
+          "openaiReasoning": "medium",
+          "grokReasoning": "high"
+        }
+      }
+    },
+    {
+      "voice": {
+        "version": 1,
+        "voiceId": "echo",
+        "style": "warm",
+        "pace": "normal",
+        "patience": 3,
+        "bargeIn": true,
+        "keyTerms": [],
+        "pronunciations": [],
+        "noiseReduction": 5,
+        "languageLock": false,
+        "engine": "auto",
+        "advanced": {
+          "speed": 1.167,
+          "model": "gpt-realtime",
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "fillers": true,
+          "speakingStyle": "",
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      },
+      "engine": {
+        "realtimeProvider": "openai",
+        "model": "gpt-realtime",
+        "voice": "echo",
+        "speed": 1.167,
+        "noiseReductionLevel": 5,
+        "voiceProfile": {
+          "turnSensitivity": 3,
+          "bargeIn": true,
+          "keyTerms": [],
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "pace": "normal",
+          "pronunciations": [],
+          "fillers": true,
+          "speakingStyle": "",
+          "languageLock": false,
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      }
+    }
+  ]
+}
