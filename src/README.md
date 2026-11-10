@@ -35,7 +35,7 @@ ne peut pas extraire proprement sans gros refactor.
 
 | Fichier | Contenu |
 |---------|---------|
-| **`tools/calendar.ts`** | Tools tenant : calendrier (`list_available_dates`, `check_availability`, `book_appointment`, `find_appointment`, `cancel_appointment`, `reschedule_appointment`) + CRM (`save_contact`, auto-save dans book). POST `/api/calendar/*` et `/api/sheets/contact` via `webPost` avec routing tenant `x-tenant-phone` / `x-tenant-user-id`. Gating par `features` du plan. |
+| **`tools/calendar.ts`** | Tools tenant : calendrier (`check_availability`, `book_appointment`, `find_appointment`, `cancel_appointment`, `reschedule_appointment`) + CRM (`save_contact`, auto-save dans book). POST `/api/calendar/*` et `/api/sheets/contact` via `webPost` avec routing tenant `x-tenant-phone` / `x-tenant-user-id`. Gating par `features` du plan. |
 | **`tools/business.ts`** | 5 tools structurés depuis `agent_configs.business` : `list_centres`, `get_centre_info`, `get_opening_hours`, `list_services`, `find_service`. |
 | **`tools/knowledge.ts`** | Tools legacy `knowledge` (un par entrée) — fallback pour les tenants pas encore migrés vers `business`. À droper en release N+1. |
 
