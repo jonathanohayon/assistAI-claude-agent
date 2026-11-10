@@ -27,6 +27,8 @@ interface ContractJson {
   defaultStyle: string;
   engines: string[];
   defaultVoice: Record<string, unknown>;
+  /** V6 style presets per engine; "warm" is empty (= today). */
+  stylePresets: Record<string, Record<RealtimeProvider, { instruction: string; speedFactor: number }>>;
   examples: Array<{ voice: unknown; engine: EngineSettings }>;
 }
 
@@ -82,11 +84,17 @@ export function engineFromVoiceConfig(vc: unknown): EngineSettings | null {
   if (typeof vc['voiceId'] !== 'string' || !vc['voiceId']) return null;
   if (typeof vc['engine'] !== 'string' || !ENGINES.has(vc['engine'])) return null;
   const engine = vc['engine'] as 'auto' | RealtimeProvider;
+  const provider: RealtimeProvider = engine === 'auto' ? 'openai' : engine;
+  // Style preset (V6, from the shared contract). Unknown style → warm (= today).
+  const presets = VOICE_CONTRACT.stylePresets;
+  const preset = (presets[String(vc['style'])] ?? presets['warm'])![provider]!;
+  const ownStyle = typeof a['speakingStyle'] === 'string' ? a['speakingStyle'] : '';
+  const baseSpeed = typeof a['speed'] === 'number' ? a['speed'] : 1;
   return {
-    realtimeProvider: engine === 'auto' ? 'openai' : engine,
+    realtimeProvider: provider,
     model: typeof a['model'] === 'string' && a['model'] ? a['model'] : REALTIME_CONFIG.model,
     voice: vc['voiceId'],
-    speed: typeof a['speed'] === 'number' ? a['speed'] : 1,
+    speed: preset.speedFactor === 1 ? baseSpeed : Math.round(baseSpeed * preset.speedFactor * 1000) / 1000,
     noiseReductionLevel: nrl(vc['noiseReduction']),
     voiceProfile: {
       turnSensitivity: vc['patience'],
@@ -100,7 +108,8 @@ export function engineFromVoiceConfig(vc: unknown): EngineSettings | null {
       pace: vc['pace'],
       pronunciations: vc['pronunciations'],
       fillers: a['fillers'],
-      speakingStyle: a['speakingStyle'],
+      // No preset text → the tenant's line verbatim (same as the web).
+      speakingStyle: preset.instruction ? [preset.instruction, ownStyle.trim()].filter(Boolean).join(' ') : a['speakingStyle'],
       languageLock: vc['languageLock'],
       openaiTurnMode: a['openaiTurnMode'],
       openaiEagerness: a['openaiEagerness'],

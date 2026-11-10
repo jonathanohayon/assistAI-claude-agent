@@ -71,6 +71,64 @@
       "grokReasoning": "high"
     }
   },
+  "stylePresets": {
+    "warm": {
+      "openai": {
+        "instruction": "",
+        "speedFactor": 1
+      },
+      "gemini": {
+        "instruction": "",
+        "speedFactor": 1
+      },
+      "xai": {
+        "instruction": "",
+        "speedFactor": 1
+      }
+    },
+    "professional": {
+      "openai": {
+        "instruction": "Sound composed and businesslike: clear, courteous and to the point, with little small talk.",
+        "speedFactor": 1
+      },
+      "gemini": {
+        "instruction": "Sound composed and businesslike: clear, courteous and to the point, with little small talk.",
+        "speedFactor": 1
+      },
+      "xai": {
+        "instruction": "Sound composed and businesslike: clear, courteous and to the point, with little small talk.",
+        "speedFactor": 1
+      }
+    },
+    "dynamic": {
+      "openai": {
+        "instruction": "Sound upbeat and energetic, with a lively, smiling tone and short sentences.",
+        "speedFactor": 1.08
+      },
+      "gemini": {
+        "instruction": "Sound upbeat and energetic, with a lively, smiling tone and short sentences. Speak at a brisk pace.",
+        "speedFactor": 1
+      },
+      "xai": {
+        "instruction": "Sound upbeat and energetic, with a lively, smiling tone and short sentences. Speak at a brisk pace.",
+        "speedFactor": 1
+      }
+    },
+    "calm": {
+      "openai": {
+        "instruction": "Sound calm, soft and reassuring; leave short pauses and never rush.",
+        "speedFactor": 0.92
+      },
+      "gemini": {
+        "instruction": "Sound calm, soft and reassuring; leave short pauses and never rush. Speak slowly.",
+        "speedFactor": 1
+      },
+      "xai": {
+        "instruction": "Sound calm, soft and reassuring; leave short pauses and never rush. Speak slowly.",
+        "speedFactor": 1
+      }
+    }
+  },
   "examples": [
     {
       "voice": {
@@ -313,6 +371,180 @@
           "pronunciations": [],
           "fillers": true,
           "speakingStyle": "",
+          "languageLock": false,
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      }
+    },
+    {
+      "voice": {
+        "version": 1,
+        "voiceId": "marin",
+        "style": "calm",
+        "pace": "normal",
+        "patience": 3,
+        "bargeIn": true,
+        "keyTerms": [],
+        "pronunciations": [],
+        "noiseReduction": 8,
+        "languageLock": false,
+        "engine": "auto",
+        "advanced": {
+          "speed": 1.1,
+          "model": "gpt-realtime-2",
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "fillers": true,
+          "speakingStyle": "Mock line.",
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      },
+      "engine": {
+        "realtimeProvider": "openai",
+        "model": "gpt-realtime-2",
+        "voice": "marin",
+        "speed": 1.012,
+        "noiseReductionLevel": 8,
+        "voiceProfile": {
+          "turnSensitivity": 3,
+          "bargeIn": true,
+          "keyTerms": [],
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "pace": "normal",
+          "pronunciations": [],
+          "fillers": true,
+          "speakingStyle": "Sound calm, soft and reassuring; leave short pauses and never rush. Mock line.",
+          "languageLock": false,
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      }
+    },
+    {
+      "voice": {
+        "version": 1,
+        "voiceId": "marin",
+        "style": "dynamic",
+        "pace": "normal",
+        "patience": 3,
+        "bargeIn": true,
+        "keyTerms": [],
+        "pronunciations": [],
+        "noiseReduction": 8,
+        "languageLock": false,
+        "engine": "gemini",
+        "advanced": {
+          "speed": null,
+          "model": "gpt-realtime-2",
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "fillers": true,
+          "speakingStyle": "",
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      },
+      "engine": {
+        "realtimeProvider": "gemini",
+        "model": "gpt-realtime-2",
+        "voice": "marin",
+        "speed": 1,
+        "noiseReductionLevel": 8,
+        "voiceProfile": {
+          "turnSensitivity": 3,
+          "bargeIn": true,
+          "keyTerms": [],
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "pace": "normal",
+          "pronunciations": [],
+          "fillers": true,
+          "speakingStyle": "Sound upbeat and energetic, with a lively, smiling tone and short sentences. Speak at a brisk pace.",
+          "languageLock": false,
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      }
+    },
+    {
+      "voice": {
+        "version": 1,
+        "voiceId": "marin",
+        "style": "professional",
+        "pace": "normal",
+        "patience": 3,
+        "bargeIn": true,
+        "keyTerms": [],
+        "pronunciations": [],
+        "noiseReduction": 8,
+        "languageLock": false,
+        "engine": "xai",
+        "advanced": {
+          "speed": null,
+          "model": "gpt-realtime-2",
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "fillers": true,
+          "speakingStyle": "",
+          "openaiTurnMode": "server_vad",
+          "openaiEagerness": "auto",
+          "openaiNoiseReduction": "off",
+          "openaiReasoning": "default",
+          "grokReasoning": "high"
+        }
+      },
+      "engine": {
+        "realtimeProvider": "xai",
+        "model": "gpt-realtime-2",
+        "voice": "marin",
+        "speed": 1,
+        "noiseReductionLevel": 8,
+        "voiceProfile": {
+          "turnSensitivity": 3,
+          "bargeIn": true,
+          "keyTerms": [],
+          "languageHint": "auto",
+          "voiceOverrides": {},
+          "minInterruptionMs": 500,
+          "idleHangupSec": 30,
+          "maxDurationMin": 30,
+          "pace": "normal",
+          "pronunciations": [],
+          "fillers": true,
+          "speakingStyle": "Sound composed and businesslike: clear, courteous and to the point, with little small talk.",
           "languageLock": false,
           "openaiTurnMode": "server_vad",
           "openaiEagerness": "auto",
