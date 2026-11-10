@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 
 export interface SessionContext {
   origin?: {
-    kind?: 'sip' | 'web' | 'campaign' | 'outbound_test' | 'unknown';
+    kind?: 'sip' | 'web' | 'campaign' | 'outbound_test' | 'call_me' | 'unknown';
     userId?: string;
     calledNumber?: string;
     campaignId?: string;
