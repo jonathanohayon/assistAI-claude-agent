@@ -135,7 +135,7 @@ export async function fetchConfig(
         ? `/api/agent/config?phone=${encodeURIComponent(origin.calledNumber)}${
             opts.caller ? `&caller=${encodeURIComponent(opts.caller)}` : ''
           }`
-        : origin.kind === 'web'
+        : origin.kind === 'web' || origin.kind === 'call_me'
           ? `/api/agent/config?userId=${encodeURIComponent(origin.userId)}`
           : origin.kind === 'campaign'
             ? `/api/agent/campaign-config?campaignId=${encodeURIComponent(origin.campaignId)}&contactId=${encodeURIComponent(origin.contactId)}`

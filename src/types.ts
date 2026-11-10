@@ -187,4 +187,9 @@ export type SessionOrigin =
   // vient de /api/agent/outbound-test-config (voix/persona/connaissance de
   // l'agent). Aucun recap (c'est un test).
   | { kind: 'outbound_test'; agentId: string; userId: string }
+  // "Call me" (V7b): the tenant's receptionist calls its OWNER from the
+  // dashboard. Dispatch/participant metadata { source:'call_me', userId },
+  // room callme__<userId>__<ts>. Config = /api/agent/config?userId= (the
+  // receptionist persona); no recap, no transfer (it's a test).
+  | { kind: 'call_me'; userId: string }
   | { kind: 'unknown' };

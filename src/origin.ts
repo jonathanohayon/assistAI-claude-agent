@@ -182,6 +182,28 @@ function campaignFromRoomName(name: string | undefined): SessionOrigin | null {
   return null;
 }
 
+// "Call me" (V7b) from job / participant metadata.
+export function parseCallMeMeta(raw?: string | null): SessionOrigin | null {
+  if (!raw) return null;
+  try {
+    const meta = JSON.parse(raw) as { source?: string; userId?: string };
+    if (meta.source === 'call_me' && typeof meta.userId === 'string' && meta.userId) {
+      return { kind: 'call_me', userId: meta.userId };
+    }
+  } catch {
+    /* not JSON → not a call-me */
+  }
+  return null;
+}
+
+// Room name set by the web (lib/campaigns/dial.ts callMeRoomName):
+//   callme__<userId>__<ts>
+export function callMeFromRoomName(name: string | undefined): SessionOrigin | null {
+  if (!name || !name.startsWith('callme__')) return null;
+  const userId = name.split('__')[1];
+  return userId ? { kind: 'call_me', userId } : null;
+}
+
 export async function detectOrigin(
   ctx: JobContext<ProcessUserData>,
   timeoutMs: number = ORIGIN_DETECTION_TIMEOUT_MS,
@@ -190,6 +212,10 @@ export async function detectOrigin(
   // — le plus robuste, dispo immédiatement.
   const campaign = campaignOriginOf(ctx) ?? campaignFromRoomName(ctx.room?.name);
   if (campaign) return campaign;
+  // "Call me": checked before the participant loop — the owner's leg is a
+  // SIP participant and would otherwise be taken for an INBOUND call.
+  const callMe = parseCallMeMeta(ctx.job?.metadata ?? null) ?? callMeFromRoomName(ctx.room?.name);
+  if (callMe) return callMe;
 
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -199,6 +225,8 @@ export async function detectOrigin(
       //    pour un entrant (persona réceptionniste).
       const camp = parseCampaignMeta(p.metadata);
       if (camp) return camp;
+      const me = parseCallMeMeta(p.metadata);
+      if (me) return me;
       // 1. SIP attributes (Twilio) — PSTN ou WhatsApp (préfixe `whatsapp:`)
       const sip = sipToOf(p);
       if (sip.raw)

@@ -215,7 +215,9 @@ export default defineAgent<ProcessUserData>({
         ? `${origin.channel === 'whatsapp' ? 'WA' : 'SIP'} ${origin.calledNumber}`
         : origin.kind === 'web'
           ? `Web user ${origin.userId}`
-          : '(origine inconnue)';
+          : origin.kind === 'call_me'
+            ? `Call-me ${origin.userId}`
+            : '(origine inconnue)';
     // fire-and-forget : ne jamais bloquer le chemin d'appel sur la télémétrie
     void remoteLog(
       'agent',
@@ -701,7 +703,10 @@ export default defineAgent<ProcessUserData>({
       // t.calledNumber = numéro nu (préfixe `whatsapp:` retiré) — cohérent
       // avec l'init depuis origin.calledNumber et avec ce qu'on POST à
       // /api/calls/end (jamais le préfixe whatsapp:).
-      if (t.raw) toNumber = t.calledNumber;
+      // "Call me": the leg's trunk number is OUR caller id, not a dialled
+      // tenant line — never route tools by it (cross-tenant risk); they use
+      // the userId instead.
+      if (t.raw && origin.kind !== 'call_me') toNumber = t.calledNumber;
     };
     for (const [, p] of ctx.room.remoteParticipants) captureNumbers(p);
     ctx.room.on(RoomEvent.ParticipantConnected, (p) => captureNumbers(p));
@@ -885,6 +890,9 @@ export default defineAgent<ProcessUserData>({
       recapSent = true;
       // Test live d'un agent (dashboard) → aucun recap ni persistance.
       if (origin.kind === 'outbound_test') return;
+      // "Call me": the owner testing their own receptionist → no recap
+      // (no WhatsApp to themselves, no call row).
+      if (origin.kind === 'call_me') return;
       // Appel sortant de campagne → résultat vers /api/agent/campaign-result
       // (analyse IA + transition contact côté web), pas le pipeline inbound.
       if (origin.kind === 'campaign') {
@@ -1493,7 +1501,7 @@ export default defineAgent<ProcessUserData>({
     // tenantUserId : pour web LiveTest sessions, toNumber est vide.
     // On dérive du origin.userId (résolu par detectOrigin) pour que le
     // web puisse router vers le bon Google calendar via x-tenant-user-id.
-    const tenantUserId = origin.kind === 'web' ? origin.userId : '';
+    const tenantUserId = origin.kind === 'web' || origin.kind === 'call_me' ? origin.userId : '';
     const calendarTools = makeCalendarTools({
       dialedPhone: toNumber,
       // Live getter — les attrs SIP peuvent arriver APRÈS la construction
