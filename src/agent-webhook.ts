@@ -1,5 +1,9 @@
 import { createHmac } from 'node:crypto';
 
+import { checkSafeUrl, type Resolver } from './net/safe-url.js';
+import { remoteLog } from './remote-log.js';
+import { callIdFromRoomName } from './session-context.js';
+
 /**
  * Mode « agent webhook » (BYO-agent) — le cerveau vit chez le client.
  *
@@ -49,8 +53,37 @@ export interface WebhookResult {
   reply: string | null;
   elapsedMs: number;
   /** Pourquoi on n'a pas de réponse — pour les logs, pas pour l'appelant. */
-  failure?: 'timeout' | 'http' | 'shape' | 'network';
+  failure?: 'timeout' | 'http' | 'shape' | 'network' | 'unsafe_url';
   status?: number;
+}
+
+/**
+ * Request body sent to the customer's endpoint. `call_id` is the same hashed
+ * id our web receives (callIdFromRoomName): stable across the turns of one
+ * call, and free of the caller's number carried by the raw room name.
+ */
+export function webhookRequestBody(params: {
+  roomName: string;
+  turnId: number;
+  language: string;
+  transcript: string;
+  history: WebhookTurn[];
+}): {
+  call_id: string;
+  turn_id: number;
+  language: string;
+  transcript: string;
+  history: WebhookTurn[];
+} {
+  return {
+    call_id: callIdFromRoomName(params.roomName),
+    turn_id: params.turnId,
+    language: params.language,
+    transcript: params.transcript,
+    // Fenêtre glissante : l'historique complet d'un appel long ferait grossir
+    // la charge utile à chaque tour, au détriment du budget.
+    history: params.history.slice(-12),
+  };
 }
 
 /**
@@ -63,22 +96,19 @@ export interface WebhookResult {
 export async function callAgentWebhook(
   config: AgentWebhookConfig,
   params: {
-    callId: string;
+    /**
+     * Raw LiveKit room name. Never sent as is: SIP room names embed the
+     * caller's number, so the customer's endpoint only gets its hash.
+     */
+    roomName: string;
     turnId: number;
     language: string;
     transcript: string;
     history: WebhookTurn[];
   },
+  deps: { resolve?: Resolver } = {},
 ): Promise<WebhookResult> {
-  const body = JSON.stringify({
-    call_id: params.callId,
-    turn_id: params.turnId,
-    language: params.language,
-    transcript: params.transcript,
-    // Fenêtre glissante : l'historique complet d'un appel long ferait grossir
-    // la charge utile à chaque tour, au détriment du budget.
-    history: params.history.slice(-12),
-  });
+  const body = JSON.stringify(webhookRequestBody(params));
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -95,6 +125,33 @@ export async function callAgentWebhook(
   const startedAt = Date.now();
 
   try {
+    // Connect-time check: https only, every DNS record public. The lookup
+    // counts against the turn budget; a hung resolver is a timeout.
+    const safety = await Promise.race([
+      checkSafeUrl(config.url, deps.resolve),
+      new Promise<'timeout'>((resolve) => {
+        controller.signal.addEventListener('abort', () => resolve('timeout'), { once: true });
+      }),
+    ]);
+    if (safety === 'timeout') {
+      return { reply: null, elapsedMs: Date.now() - startedAt, failure: 'timeout' };
+    }
+    if (!safety.ok) {
+      const elapsedMs = Date.now() - startedAt;
+      if (safety.reason === 'dns_failure') {
+        return { reply: null, elapsedMs, failure: 'network' };
+      }
+      // No URL and no address in the log: the reason is enough to act on.
+      void remoteLog(
+        'agent',
+        'agent_webhook_unsafe_url',
+        `Agent webhook URL refused (${safety.reason}); no request sent`,
+        'error',
+        { reason: safety.reason },
+      );
+      return { reply: null, elapsedMs, failure: 'unsafe_url' };
+    }
+
     const res = await fetch(config.url, {
       method: 'POST',
       headers,
