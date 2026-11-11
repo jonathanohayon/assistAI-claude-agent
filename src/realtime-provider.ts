@@ -8,6 +8,7 @@
  * tests/realtime-provider.test.ts.
  */
 import { EndSensitivity, StartSensitivity } from '@google/genai';
+import { MALE_VOICE_IDS } from './voice-config.js';
 
 export type RealtimeProvider = 'openai' | 'gemini' | 'xai';
 
@@ -80,8 +81,8 @@ export const OPENAI_TO_GEMINI_VOICE: Record<string, string> = {
   cedar: 'Achird', // male, friendly
   coral: 'Aoede', // female, breezy
 };
-/** Gender of the other OpenAI voices (same table as the web's VOICE_GENDER). */
-const OPENAI_MALE_VOICES = new Set(['ballad', 'verse', 'alloy', 'echo', 'fable', 'onyx', 'ash']);
+/** Male OpenAI voices, from the shared Voice contract (one gender table, web lib/voice). */
+const OPENAI_MALE_VOICES = MALE_VOICE_IDS;
 export const DEFAULT_GEMINI_MALE_VOICE = 'Charon';
 
 const BCP47: Record<string, string> = { he: 'he-IL', fr: 'fr-FR', en: 'en-US' };

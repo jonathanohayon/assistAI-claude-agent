@@ -34,6 +34,7 @@ import {
 import { fetchVoxConfigByPhone, voxInstructions } from './vox-config.js';
 import { webGet } from './web-api.js';
 import { parseClientProfile } from './client-profile.js';
+import { engineFromLegacy, resolveEngineSettings } from './voice-config.js';
 
 /**
  * Permissif par défaut — si le fetch échoue ou si l'admin n'a pas encore
@@ -91,6 +92,7 @@ export async function fetchConfig(
   if (origin.kind === 'sip') {
     const vox = await fetchVoxConfigByPhone(origin.calledNumber);
     if (vox) {
+      const voxEngine = engineFromLegacy({ voice: vox.voice, speed: vox.speed });
       console.log(
         `[config] agent Tamara « ${vox.name} » (${vox.id}) pour ${origin.calledNumber}`,
       );
@@ -100,11 +102,12 @@ export async function fetchConfig(
         instructions: voxInstructions(vox),
         greetingInstructions: '',
         agentName: vox.name,
-        model: REALTIME_CONFIG.model,
-        voice: vox.voice,
-        speed: vox.speed,
+        // Same mapping as every other call type (vox serves voice + speed only).
+        model: voxEngine.model,
+        voice: voxEngine.voice,
+        speed: voxEngine.speed,
         maxResponseTokens: 220,
-        noiseReductionLevel: DEFAULT_NOISE_REDUCTION_LEVEL,
+        noiseReductionLevel: voxEngine.noiseReductionLevel,
         greetingFallbackTemplate: '',
         // Un agent Tamara n'utilise aucun tool du tenant : son cerveau est
         // ailleurs et ne connaît ni notre agenda ni notre CRM.
@@ -156,21 +159,25 @@ export async function fetchConfig(
       return defaultConfig();
     }
     const data = (await res.json()) as Partial<FetchedConfig>;
+    const engine = resolveEngineSettings(data as Record<string, unknown>);
+    console.log(`[config] voice settings from ${engine.source}`);
+    if (engine.mismatch.length) {
+      console.warn(`[config] voice mismatch ${engine.mismatch.join(',')}`);
+    }
 
     return {
       instructions: data.instructions ?? FALLBACK_INSTRUCTIONS,
       greetingInstructions: data.greetingInstructions ?? FALLBACK_GREETING,
       agentName: typeof data.agentName === 'string' ? data.agentName : '',
-      realtimeProvider:
-        data.realtimeProvider === 'gemini' || data.realtimeProvider === 'xai'
-          ? data.realtimeProvider
-          : 'openai',
-      voiceProfile: data.voiceProfile,
+      // Engine settings: ONE mapping for every call type (src/voice-config.ts),
+      // from voiceConfig when the web serves it, else the legacy fields.
+      realtimeProvider: engine.realtimeProvider,
+      voiceProfile: engine.voiceProfile,
       clientProfile: parseClientProfile(data.clientProfile),
       transferNumber: typeof data.transferNumber === 'string' ? data.transferNumber : '',
-      model: data.model ?? REALTIME_CONFIG.model,
-      voice: data.voice ?? REALTIME_CONFIG.voice,
-      speed: data.speed ?? REALTIME_CONFIG.speed,
+      model: engine.model,
+      voice: engine.voice,
+      speed: engine.speed,
       maxResponseTokens: data.maxResponseTokens ?? 220,
       greetingFallbackTemplate:
         typeof data.greetingFallbackTemplate === 'string'
@@ -178,13 +185,7 @@ export async function fetchConfig(
           : '',
       // Slider 1-10. Si /api/agent/config n'a pas encore le champ (DB
       // pas migrée ou ancien deploy), fallback sur DEFAULT_NOISE_REDUCTION_LEVEL.
-      noiseReductionLevel:
-        typeof data.noiseReductionLevel === 'number'
-          ? Math.min(
-              10,
-              Math.max(1, Math.round(data.noiseReductionLevel)),
-            )
-          : DEFAULT_NOISE_REDUCTION_LEVEL,
+      noiseReductionLevel: engine.noiseReductionLevel,
       // Si le web n'a pas (encore) déployé le champ features, on ouvre
       // tout par défaut (mode legacy = plan premium implicite).
       features: data.features ?? DEFAULT_FEATURES,
