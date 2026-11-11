@@ -12,17 +12,17 @@ import { sipFromOf } from './origin.js';
 
 export type TransferResult = { ok: true } | { ok: false; error: string };
 
-/** Only real phone calls with a configured number can be transferred. */
+/** Only real phone calls with a configured number can be transferred:
+ *  inbound PSTN, or an outbound campaign call (its callee is a SIP leg). */
 export function transferEligible(args: {
   originKind: string;
   channel?: string | undefined;
   transferNumber?: string | null | undefined;
 }): boolean {
-  return (
-    args.originKind === 'sip' &&
-    (args.channel ?? 'pstn') === 'pstn' &&
-    /^\+[1-9]\d{7,14}$/.test(args.transferNumber ?? '')
-  );
+  const phoneLeg =
+    (args.originKind === 'sip' && (args.channel ?? 'pstn') === 'pstn') ||
+    args.originKind === 'campaign';
+  return phoneLeg && /^\+[1-9]\d{7,14}$/.test(args.transferNumber ?? '');
 }
 
 /** SIP REFER target for an E.164 number. */

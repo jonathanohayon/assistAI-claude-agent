@@ -168,6 +168,10 @@ export async function fetchConfig(
       voiceProfile: data.voiceProfile,
       clientProfile: parseClientProfile(data.clientProfile),
       transferNumber: typeof data.transferNumber === 'string' ? data.transferNumber : '',
+      // Outbound tools (T4c): present only when the web turned one on.
+      ...(typeof data.accountId === 'string' && data.accountId.trim() !== ''
+        ? { accountId: data.accountId.trim() }
+        : {}),
       model: data.model ?? REALTIME_CONFIG.model,
       voice: data.voice ?? REALTIME_CONFIG.voice,
       speed: data.speed ?? REALTIME_CONFIG.speed,

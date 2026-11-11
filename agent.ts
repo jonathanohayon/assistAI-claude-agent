@@ -70,6 +70,7 @@ import { startHeartbeat } from './src/heartbeat.js';
 import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
 import { clientProfileLine } from './src/client-profile.js';
 import { findSipCallerIdentity, transferCall, transferEligible } from './src/transfer.js';
+import { planCallTools } from './src/call-tools.js';
 import {
   DEFAULT_VOICE_PROFILE,
   mapGemini,
@@ -1167,7 +1168,14 @@ export default defineAgent<ProcessUserData>({
     // transfer_call, then announces; the REFER starts once that announcement
     // has played (8 s cap). No number or a failed REFER -> the model apologises
     // and offers to take a message.
-    const isPstnCall = origin.kind === 'sip' && origin.channel === 'pstn';
+    // Which tools this call gets (src/call-tools.ts): inbound unchanged;
+    // outbound only what the web turned on, routed by the account id.
+    const toolPlan = planCallTools(origin, cfg);
+    if (toolPlan.error) {
+      void remoteLog('agent', toolPlan.error.event, toolPlan.error.message, 'error', {
+        origin: origin.kind,
+      });
+    }
     const canTransfer = transferEligible({
       originKind: origin.kind,
       channel: origin.kind === 'sip' ? origin.channel : undefined,
@@ -1503,6 +1511,8 @@ export default defineAgent<ProcessUserData>({
       // miroir exact du pattern getCallerPhone.
       getDialedPhone: () => toNumber,
       tenantUserId,
+      // Outbound (T4c): route by the campaign owner's id, never a number.
+      ...(toolPlan.outboundAccountId ? { outboundAccountId: toolPlan.outboundAccountId } : {}),
       // Live getter — fromNumber may arrive AFTER tools are built (SIP attrs
       // race). Convert +972 → 0 here too so the WhatsApp the owner reads
       // shows the local format directly.
@@ -1511,16 +1521,13 @@ export default defineAgent<ProcessUserData>({
       // Si le tenant a calendar=false, le modèle ne verra même pas les
       // tools check_availability/book_appointment/... et ne pourra donc
       // pas les hallucinate.
-      features: {
-        calendar: cfg.features.calendar !== false,
-        crm: cfg.features.crm !== false,
-      },
+      features: toolPlan.calendarFeatures,
     });
 
     // Tool de prise de commandes — enregistré UNIQUEMENT si le tenant a activé
     // le toggle "Commandes" (cfg.ordersEnabled). Sinon le modèle ne voit pas
     // le tool et ne peut pas l'halluciner (cf. même logique que calendar/crm).
-    const ordersTools = cfg.ordersEnabled
+    const ordersTools = toolPlan.orders
       ? makeOrdersTools({
           dialedPhone: toNumber,
           getDialedPhone: () => toNumber,
@@ -1607,7 +1614,7 @@ export default defineAgent<ProcessUserData>({
         sessionStartedAt: new Date().toISOString(),
         // Tools registrés visibles par le LLM (built-in + knowledge)
         toolsRegistered: [
-          ...(cfg.features.calendar !== false
+          ...(toolPlan.calendarFeatures.calendar
             ? [
                 'check_availability',
                 'book_appointment',
@@ -1617,7 +1624,7 @@ export default defineAgent<ProcessUserData>({
                 'reschedule_appointment',
               ]
             : []),
-          ...(cfg.ordersEnabled ? ['record_order'] : []),
+          ...(toolPlan.orders ? ['record_order'] : []),
           ...businessNames,
           ...knowledgeNames,
           'end_call',
@@ -1641,7 +1648,7 @@ export default defineAgent<ProcessUserData>({
         ...businessTools,
         ...knowledgeTools,
         end_call: endCallTool,
-        ...(isPstnCall ? { transfer_call: transferCallTool } : {}),
+        ...(toolPlan.transfer ? { transfer_call: transferCallTool } : {}),
       },
     });
 
