@@ -8,7 +8,12 @@
  * garbled body) keeps the defaults: an outage on our side must not drop calls.
  */
 
-export type ConfigRefusal = 'unknown_number' | 'trial_exhausted';
+/**
+ * `config_unavailable`: an OUTBOUND call (campaign / outbound test) whose
+ * config couldn't be loaded — we placed the call, so there is no caller to
+ * take a message from: drop it before speaking (src/config-fetcher.ts).
+ */
+export type ConfigRefusal = 'unknown_number' | 'trial_exhausted' | 'config_unavailable';
 
 export function refusalFromResponse(
   status: number,
