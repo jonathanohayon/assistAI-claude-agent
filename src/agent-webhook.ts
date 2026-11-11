@@ -1,6 +1,13 @@
 import { createHmac } from 'node:crypto';
+import https from 'node:https';
 
-import { checkSafeUrl, type Resolver } from './net/safe-url.js';
+import {
+  checkUrlShape,
+  guardedLookup,
+  UnsafeAddressError,
+  type Resolver,
+  type UnsafeReason,
+} from './net/safe-url.js';
 import { remoteLog } from './remote-log.js';
 import { callIdFromRoomName } from './session-context.js';
 
@@ -47,6 +54,12 @@ const STALL: Record<string, string> = {
 
 export function stallLine(language: string): string {
   return STALL[language] ?? STALL['en']!;
+}
+
+/** Injectable for tests: DNS resolver and the https request function. */
+export interface WebhookDeps {
+  resolve?: Resolver;
+  request?: typeof https.request;
 }
 
 export interface WebhookResult {
@@ -106,7 +119,7 @@ export async function callAgentWebhook(
     transcript: string;
     history: WebhookTurn[];
   },
-  deps: { resolve?: Resolver } = {},
+  deps: WebhookDeps = {},
 ): Promise<WebhookResult> {
   const body = JSON.stringify(webhookRequestBody(params));
 
@@ -120,71 +133,139 @@ export async function callAgentWebhook(
       .digest('hex');
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TURN_BUDGET_MS);
   const startedAt = Date.now();
 
-  try {
-    // Connect-time check: https only, every DNS record public. The lookup
-    // counts against the turn budget; a hung resolver is a timeout.
-    const safety = await Promise.race([
-      checkSafeUrl(config.url, deps.resolve),
-      new Promise<'timeout'>((resolve) => {
-        controller.signal.addEventListener('abort', () => resolve('timeout'), { once: true });
-      }),
-    ]);
-    if (safety === 'timeout') {
-      return { reply: null, elapsedMs: Date.now() - startedAt, failure: 'timeout' };
-    }
-    if (!safety.ok) {
-      const elapsedMs = Date.now() - startedAt;
-      if (safety.reason === 'dns_failure') {
-        return { reply: null, elapsedMs, failure: 'network' };
-      }
-      // No URL and no address in the log: the reason is enough to act on.
-      void remoteLog(
-        'agent',
-        'agent_webhook_unsafe_url',
-        `Agent webhook URL refused (${safety.reason}); no request sent`,
-        'error',
-        { reason: safety.reason },
-      );
-      return { reply: null, elapsedMs, failure: 'unsafe_url' };
-    }
+  // Cheap early refusal on the URL alone (scheme, credentials, internal
+  // hostname, IP literal). DNS is checked once, at connect time, by the
+  // socket's own lookup — see postToAgent.
+  const shape = checkUrlShape(config.url);
+  if (!shape.ok) return refused(shape.reason, startedAt);
 
-    const res = await fetch(config.url, {
-      method: 'POST',
-      headers,
-      body,
-      signal: controller.signal,
-      redirect: 'error',
-    });
-    const elapsedMs = Date.now() - startedAt;
+  const outcome = await postToAgent(new URL(config.url), headers, body, deps);
+  const elapsedMs = Date.now() - startedAt;
 
-    if (!res.ok) {
-      return { reply: null, elapsedMs, failure: 'http', status: res.status };
-    }
-
-    const raw = await res.text();
-    let reply: string | null = null;
-    try {
-      const parsed = JSON.parse(raw) as { reply?: unknown };
-      if (typeof parsed.reply === 'string' && parsed.reply.trim()) {
-        reply = parsed.reply.trim();
-      }
-    } catch {
-      // Corps non-JSON → traité comme une réponse mal formée.
-    }
-
-    if (!reply) {
-      return { reply: null, elapsedMs, failure: 'shape', status: res.status };
-    }
-    return { reply, elapsedMs, status: res.status };
-  } catch (e) {
-    const elapsedMs = Date.now() - startedAt;
-    const aborted = (e as Error)?.name === 'AbortError';
-    return { reply: null, elapsedMs, failure: aborted ? 'timeout' : 'network' };
-  } finally {
-    clearTimeout(timer);
+  if (outcome.kind === 'refused') {
+    if (outcome.reason === 'dns_failure') return { reply: null, elapsedMs, failure: 'network' };
+    return refused(outcome.reason, startedAt);
   }
+  if (outcome.kind === 'failed') return { reply: null, elapsedMs, failure: outcome.failure };
+
+  // No redirects are followed: a 3xx is a failed turn, like any non-2xx.
+  if (outcome.status < 200 || outcome.status >= 300) {
+    return { reply: null, elapsedMs, failure: 'http', status: outcome.status };
+  }
+  if (outcome.tooLarge) {
+    return { reply: null, elapsedMs, failure: 'shape', status: outcome.status };
+  }
+
+  let reply: string | null = null;
+  try {
+    const parsed = JSON.parse(outcome.text) as { reply?: unknown };
+    if (typeof parsed.reply === 'string' && parsed.reply.trim()) {
+      reply = parsed.reply.trim();
+    }
+  } catch {
+    // Corps non-JSON → traité comme une réponse mal formée.
+  }
+
+  if (!reply) {
+    return { reply: null, elapsedMs, failure: 'shape', status: outcome.status };
+  }
+  return { reply, elapsedMs, status: outcome.status };
+}
+
+/** A refused URL: failed turn, no request, one log with the reason only. */
+function refused(reason: UnsafeReason, startedAt: number): WebhookResult {
+  // No URL and no address in the log: the reason is enough to act on.
+  void remoteLog(
+    'agent',
+    'agent_webhook_unsafe_url',
+    `Agent webhook URL refused (${reason}); no request sent`,
+    'error',
+    { reason },
+  );
+  return { reply: null, elapsedMs: Date.now() - startedAt, failure: 'unsafe_url' };
+}
+
+/** Largest reply body read from the customer's agent; beyond it → 'shape'. */
+export const MAX_RESPONSE_BYTES = 64 * 1024;
+
+/**
+ * Dedicated keep-alive pool: every socket in it was opened through
+ * guardedLookup, so a reused socket is one whose address was checked.
+ */
+const webhookAgent = new https.Agent({ keepAlive: true });
+
+type PostOutcome =
+  | { kind: 'response'; status: number; text: string; tooLarge: boolean }
+  | { kind: 'refused'; reason: UnsafeReason }
+  | { kind: 'failed'; failure: 'timeout' | 'network' };
+
+/**
+ * POST over node:https with a connect-time address check. Never rejects.
+ * The whole exchange (DNS, connect, TLS, response) fits in TURN_BUDGET_MS.
+ */
+function postToAgent(
+  url: URL,
+  headers: Record<string, string>,
+  body: string,
+  deps: WebhookDeps,
+): Promise<PostOutcome> {
+  const request = deps.request ?? https.request;
+  return new Promise<PostOutcome>((resolve) => {
+    let settled = false;
+    const done = (outcome: PostOutcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+
+    const req = request(
+      {
+        protocol: 'https:',
+        hostname: url.hostname,
+        port: url.port || 443,
+        path: `${url.pathname}${url.search}`,
+        method: 'POST',
+        headers: { ...headers, 'Content-Length': String(Buffer.byteLength(body)) },
+        lookup: guardedLookup(deps.resolve),
+        agent: deps.request ? undefined : webhookAgent,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          res.resume();
+          done({ kind: 'response', status, text: '', tooLarge: false });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > MAX_RESPONSE_BYTES) {
+            done({ kind: 'response', status, text: '', tooLarge: true });
+            res.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on('end', () => {
+          done({ kind: 'response', status, text: Buffer.concat(chunks).toString('utf8'), tooLarge: false });
+        });
+        res.on('error', () => done({ kind: 'failed', failure: 'network' }));
+      },
+    );
+
+    const timer = setTimeout(() => {
+      done({ kind: 'failed', failure: 'timeout' });
+      req.destroy();
+    }, TURN_BUDGET_MS);
+
+    req.on('error', (err: Error) => {
+      if (err instanceof UnsafeAddressError) done({ kind: 'refused', reason: err.reason });
+      else done({ kind: 'failed', failure: 'network' });
+    });
+    req.end(body);
+  });
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { checkSafeUrl, isBlockedAddress, type Resolver } from '../src/net/safe-url.js';
+import { checkSafeUrl, guardedLookup, isBlockedAddress, UnsafeAddressError, type Resolver } from '../src/net/safe-url.js';
 
 const resolvesTo = (...addresses: string[]): Resolver => async () =>
   addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
@@ -64,5 +64,33 @@ for (const addr of ['172.15.255.255', '172.32.0.1', '100.63.255.255', '100.128.0
 // resolver failure / empty answer
 assert.equal(await reason('https://agent.example.com/', async () => { throw new Error('ENOTFOUND'); }), 'dns_failure');
 assert.equal(await reason('https://agent.example.com/', resolvesTo()), 'dns_failure');
+
+// guardedLookup: the connect-time check used as the socket's lookup
+type Cb = (err: Error | null, address: unknown, family?: number) => void;
+const callLookup = (resolver: Resolver, options: object) =>
+  new Promise<{ err: Error | null; address: unknown; family?: number }>((done) => {
+    (guardedLookup(resolver) as unknown as (h: string, o: object, cb: Cb) => void)(
+      'agent.example.com', options, (err, address, family) => done({ err, address, family }),
+    );
+  });
+{
+  const both = resolvesTo('93.184.216.34', '2606:2800:220:1:248:1893:25c8:1946');
+  const one = await callLookup(both, {});
+  assert.equal(one.err, null);
+  assert.equal(one.address, '93.184.216.34');
+  assert.equal(one.family, 4);
+  const v6 = await callLookup(both, { family: 6 });
+  assert.equal(v6.address, '2606:2800:220:1:248:1893:25c8:1946');
+  const all = await callLookup(both, { all: true });
+  assert.equal((all.address as unknown[]).length, 2);
+
+  const bad = await callLookup(resolvesTo('93.184.216.34', '169.254.169.254'), { all: true });
+  assert.ok(bad.err instanceof UnsafeAddressError);
+  assert.equal((bad.err as UnsafeAddressError).reason, 'blocked_address');
+  assert.ok(!String(bad.err.message).includes('169.254'), 'error message carries no address');
+
+  const dns = await callLookup(async () => { throw new Error('ENOTFOUND'); }, {});
+  assert.equal((dns.err as UnsafeAddressError).reason, 'dns_failure');
+}
 
 console.log('safe-url: ok');

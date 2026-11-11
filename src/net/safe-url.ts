@@ -1,5 +1,6 @@
 import { lookup } from 'node:dns/promises';
-import { BlockList, isIP } from 'node:net';
+import type { LookupAllOptions, LookupOneOptions } from 'node:dns';
+import { BlockList, isIP, type LookupFunction } from 'node:net';
 
 /**
  * Connect-time check for a customer-supplied URL (legacy BYO-agent webhook).
@@ -9,9 +10,8 @@ import { BlockList, isIP } from 'node:net';
  * metadata service. Rules: https only, no internal hostnames, and every DNS
  * record of the host must be a public address.
  *
- * Known limit: the check resolves the host, then fetch resolves it again.
- * A DNS answer that changes in between (rebinding) is not caught here;
- * pinning the checked address into the connection needs a custom dispatcher.
+ * DNS rebinding: `guardedLookup` runs the DNS rules at connect time, as the
+ * socket's own `lookup`, so the address checked is the address connected to.
  *
  * Same rules as lib/net/safe-url.ts on the web side.
  */
@@ -100,13 +100,11 @@ function isInternalHostname(hostname: string): boolean {
 }
 
 /**
- * Decides whether the worker may POST to `rawUrl`. Never throws.
- * The reason is for logs only and never carries the URL or an address.
+ * URL-shape rules, no DNS: https only, no credentials, no internal hostname,
+ * and an IP-literal host must be public (Node skips `lookup` for literals,
+ * so this is where literals are checked). Never throws.
  */
-export async function checkSafeUrl(
-  rawUrl: string,
-  resolve: Resolver = defaultResolver,
-): Promise<SafeUrlResult> {
+export function checkUrlShape(rawUrl: string): SafeUrlResult {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -123,10 +121,27 @@ export async function checkSafeUrl(
     return isBlockedAddress(host) ? { ok: false, reason: 'blocked_address' } : { ok: true };
   }
   if (isInternalHostname(host)) return { ok: false, reason: 'internal_hostname' };
+  return { ok: true };
+}
 
+export type ResolvedHostResult =
+  | { ok: true; addresses: ResolvedAddress[] }
+  | { ok: false; reason: UnsafeReason };
+
+/** Resolves a hostname; refuses it unless every record is public. Never throws. */
+export async function resolvePublicHost(
+  hostname: string,
+  resolve: Resolver = defaultResolver,
+): Promise<ResolvedHostResult> {
+  if (isIP(hostname)) {
+    return isBlockedAddress(hostname)
+      ? { ok: false, reason: 'blocked_address' }
+      : { ok: true, addresses: [{ address: hostname, family: isIP(hostname) }] };
+  }
+  if (isInternalHostname(hostname)) return { ok: false, reason: 'internal_hostname' };
   let records: ResolvedAddress[];
   try {
-    records = await resolve(host);
+    records = await resolve(hostname);
   } catch {
     return { ok: false, reason: 'dns_failure' };
   }
@@ -134,5 +149,71 @@ export async function checkSafeUrl(
   if (records.some((r) => isBlockedAddress(r.address))) {
     return { ok: false, reason: 'blocked_address' };
   }
-  return { ok: true };
+  return { ok: true, addresses: records };
+}
+
+/**
+ * Full check, shape + DNS. Never throws. The reason is for logs only and
+ * never carries the URL or an address. Same rules as lib/net/safe-url.ts.
+ */
+export async function checkSafeUrl(
+  rawUrl: string,
+  resolve: Resolver = defaultResolver,
+): Promise<SafeUrlResult> {
+  const shape = checkUrlShape(rawUrl);
+  if (!shape.ok) return shape;
+  const host = new URL(rawUrl).hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host)) return { ok: true };
+  const resolved = await resolvePublicHost(host, resolve);
+  return resolved.ok ? { ok: true } : resolved;
+}
+
+/** Error raised by `guardedLookup`; `reason` is safe to log. */
+export class UnsafeAddressError extends Error {
+  readonly code: string;
+  constructor(readonly reason: UnsafeReason) {
+    super(`refused at connect (${reason})`);
+    this.code = reason === 'dns_failure' ? 'ENOTFOUND' : 'EUNSAFEADDR';
+  }
+}
+
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address: string | ResolvedAddress[],
+  family?: number,
+) => void;
+
+/**
+ * `lookup` for net/tls/https: resolves the host and refuses it at CONNECT
+ * time unless every record is public. The socket then connects to one of the
+ * addresses checked here, so there is no second resolution to rebind
+ * between check and connect. TLS SNI and Host stay the hostname.
+ */
+export function guardedLookup(resolve: Resolver = defaultResolver): LookupFunction {
+  const lookupFn = (
+    hostname: string,
+    options: LookupOneOptions | LookupAllOptions | LookupCallback,
+    maybeCallback?: LookupCallback,
+  ): void => {
+    const callback = (typeof options === 'function' ? options : maybeCallback) as LookupCallback;
+    const opts = typeof options === 'object' && options ? options : {};
+    void resolvePublicHost(hostname, resolve).then((result) => {
+      if (!result.ok) {
+        callback(new UnsafeAddressError(result.reason), opts.all ? [] : '', undefined);
+        return;
+      }
+      const wanted = opts.family === 4 || opts.family === 6 ? opts.family : 0;
+      const addresses = wanted
+        ? result.addresses.filter((a) => a.family === wanted)
+        : result.addresses;
+      const first = addresses[0];
+      if (!first) {
+        callback(new UnsafeAddressError('dns_failure'), opts.all ? [] : '', undefined);
+        return;
+      }
+      if (opts.all) callback(null, addresses);
+      else callback(null, first.address, first.family);
+    });
+  };
+  return lookupFn as unknown as LookupFunction;
 }
