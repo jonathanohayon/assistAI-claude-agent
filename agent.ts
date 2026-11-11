@@ -793,7 +793,7 @@ export default defineAgent<ProcessUserData>({
           }));
 
           const result = await callAgentWebhook(agentWebhook, {
-            callId: ctx.room.name ?? 'call',
+            roomName: ctx.room.name ?? 'call',
             turnId,
             language: cfg.primaryLanguage ?? 'fr',
             transcript: text,
@@ -1408,7 +1408,7 @@ export default defineAgent<ProcessUserData>({
         // s'il ne répond pas.
         if (webhookMode && agentWebhook) {
           const opening = await callAgentWebhook(agentWebhook, {
-            callId: ctx.room.name ?? 'call',
+            roomName: ctx.room.name ?? 'call',
             turnId: 0,
             language: cfg.primaryLanguage ?? 'fr',
             transcript: '',
