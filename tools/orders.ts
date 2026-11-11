@@ -1,6 +1,7 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+import { tenantRoutingHeaders } from '../src/call-tools.js';
 import { webPost } from '../src/web-api.js';
 
 /**
@@ -42,13 +43,7 @@ export const makeOrdersTools = (ctx: OrdersToolContext) => {
         .describe('Centre / point de retrait si pertinent (optionnel).'),
     }),
     execute: async ({ item, quantity, description, name, center }) => {
-      const dialedPhone = ctx.getDialedPhone?.() || ctx.dialedPhone;
-      const headers: Record<string, string> = {};
-      if (dialedPhone) {
-        headers['x-tenant-phone'] = dialedPhone;
-      } else if (ctx.tenantUserId) {
-        headers['x-tenant-user-id'] = ctx.tenantUserId;
-      }
+      const headers = tenantRoutingHeaders(ctx);
       const phone = ctx.getCallerPhone?.() || '';
       const res = await webPost(
         '/api/orders/record',

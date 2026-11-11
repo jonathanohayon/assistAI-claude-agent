@@ -52,6 +52,12 @@ export interface FetchedConfig {
   /** Per-tenant call-transfer number (E.164, '' = none), web #152. */
   transferNumber?: string;
   /**
+   * Outbound calls only (web T4a): the campaign owner's user id, sent ONLY
+   * when at least one outbound tool is active. Outbound tool requests route
+   * by it (src/call-tools.ts). Absent = no outbound tool.
+   */
+  accountId?: string;
+  /**
    * Template per-plan injecté quand `greetingInstructions` est vide.
    * Édité depuis `/admin` par l'admin. Placeholders : `{agent_name}`.
    * Si vide ET pas de greetingInstructions → pas d'override, persona seul.

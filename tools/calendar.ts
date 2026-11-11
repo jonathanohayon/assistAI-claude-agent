@@ -1,6 +1,7 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+import { tenantRoutingHeaders } from '../src/call-tools.js';
 import { webPost } from '../src/web-api.js';
 
 export interface ToolFeatures {
@@ -25,6 +26,10 @@ export interface ToolContext {
   /** User UUID du tenant — utilisé pour le routing tenant côté web quand
    *  le numéro composé est vide (cas web LiveTest). Header `x-tenant-user-id`. */
   tenantUserId: string;
+  /** Outbound calls only (T4c): the campaign owner's user id. When set,
+   *  every request routes by it (`x-tenant-user-id` + `x-call-direction:
+   *  outbound`) and the dialed number is ignored. */
+  outboundAccountId?: string;
   /** Live caller number getter — populated AFTER ToolContext construction
    *  via SIP attributes. The take_message tool reads it at invoke time so
    *  late-arriving attributes are picked up. Returns '' if unknown. */
@@ -37,18 +42,11 @@ export interface ToolContext {
 const makePost =
   (ctx: ToolContext) =>
   async <T>(path: string, body: unknown): Promise<T> => {
-    // Routing tenant : prefer x-tenant-phone (SIP) sinon fallback sur
-    // x-tenant-user-id (web LiveTest). Au moins un des deux doit être
-    // présent pour que le web sache quel Google calendar utiliser.
+    // Tenant routing (src/call-tools.ts): inbound = x-tenant-phone (SIP,
+    // read live) else x-tenant-user-id (web LiveTest); outbound = the
+    // account id + x-call-direction, never a call number.
     // x-internal-secret + Content-Type sont posés par webPost.
-    // Numéro composé lu LIVE à chaque requête (attrs SIP tardifs).
-    const dialedPhone = ctx.getDialedPhone?.() || ctx.dialedPhone;
-    const headers: Record<string, string> = {};
-    if (dialedPhone) {
-      headers['x-tenant-phone'] = dialedPhone;
-    } else if (ctx.tenantUserId) {
-      headers['x-tenant-user-id'] = ctx.tenantUserId;
-    }
+    const headers = tenantRoutingHeaders(ctx);
     // Mesure le round-trip worker→web (réseau Railway + traitement web + appel
     // Google côté serveur). Couplé au log web `google_events_list_latency`,
     // ça donne le découpage complet de la latence calendrier d'un appel.
