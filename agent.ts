@@ -234,8 +234,8 @@ export default defineAgent<ProcessUserData>({
       cfg = await fetchConfig(origin, { caller });
     } catch (e) {
       if (!(e instanceof ConfigRefusedError)) throw e;
-      // The web refused this call (unknown number, trial over). Never answer
-      // with the default persona: one error event, then drop the line.
+      // The web refused this call (unknown number, trial over), or an
+      // outbound call has no config: one error event, then drop the line.
       await remoteLog(
         'agent',
         'call_refused',
@@ -243,6 +243,9 @@ export default defineAgent<ProcessUserData>({
         'error',
         { reason: e.reason, origin },
       );
+      // An outbound call dropped for lack of config (config_unavailable) must
+      // not stay "in call" on the console. Idempotent.
+      campaignProgress?.ended();
       await deleteRoom(ctx.room.name ?? '');
       return;
     }

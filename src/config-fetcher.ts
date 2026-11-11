@@ -7,15 +7,12 @@
  *   - Unknown      → pas de query param → fallback resolveDefaultTenant
  *
  * Failure-open : si l'API est down ou retourne une erreur, on retombe sur
- * `defaultConfig()` (depuis `./config.js` legacy) pour ne pas planter
- * l'appel. Le tenant verra un comportement par défaut au lieu d'un crash.
+ * `defaultConfig()` — un agent NEUTRE qui prend un message, sans aucun tool
+ * (src/fallback-persona.ts) — et on le signale (`config_fallback_used`,
+ * alerte admin côté web). Jamais la persona d'une autre entreprise.
  */
 
-import {
-  GREETING_INSTRUCTIONS as FALLBACK_GREETING,
-  INSTRUCTIONS as FALLBACK_INSTRUCTIONS,
-  REALTIME_CONFIG,
-} from '../config.js';
+import { REALTIME_CONFIG } from '../config.js';
 
 import {
   CONFIG_FETCH_TIMEOUT_MS,
@@ -31,6 +28,8 @@ import {
   configFallbackLog,
   refusalFromResponse,
 } from './config-refusal.js';
+import { FALLBACK_GREETING, FALLBACK_INSTRUCTIONS } from './fallback-persona.js';
+import { remoteLog } from './remote-log.js';
 import { fetchVoxConfigByPhone, voxInstructions } from './vox-config.js';
 import { webGet } from './web-api.js';
 import { parseClientProfile } from './client-profile.js';
@@ -52,10 +51,20 @@ export const DEFAULT_FEATURES: AgentFeatures = {
   whatsapp_recap: true,
 };
 
+/** No tool on a fallback call: we couldn't load which tenant this is. */
+export const FALLBACK_FEATURES: AgentFeatures = {
+  calendar: false,
+  crm: false,
+  whatsapp_confirm: false,
+  whatsapp_recap: false,
+};
+
+/** Why the fallback was used (event metadata `code`, the alert's dedup key). */
+export type FallbackCode = 'app_url_unset' | 'fetch_failed' | `http_${number}` | 'missing_instructions';
+
 /**
- * Config par défaut utilisée quand `/api/agent/config` est injoignable
- * ou retourne une erreur HTTP. Reprend les constantes hardcodées du
- * `config.ts` legacy (persona "Tamara/Prestige" historique).
+ * Config used when `/api/agent/config` can't be loaded: the neutral
+ * message-taking agent, no tool, no transfer.
  */
 export function defaultConfig(): FetchedConfig {
   return {
@@ -68,8 +77,32 @@ export function defaultConfig(): FetchedConfig {
     maxResponseTokens: 220,
     noiseReductionLevel: DEFAULT_NOISE_REDUCTION_LEVEL,
     greetingFallbackTemplate: '',
-    features: DEFAULT_FEATURES,
+    features: FALLBACK_FEATURES,
+    transferNumber: '',
+    ordersEnabled: false,
   };
+}
+
+const isOutbound = (o: SessionOrigin) => o.kind === 'campaign' || o.kind === 'outbound_test';
+
+/**
+ * The fallback, reported loudly (stdout always; /api/events → admin alert
+ * when reachable). Inbound: the neutral message-taking agent. Outbound: we
+ * placed the call and have no script → refused (dropped before speaking).
+ */
+async function fallback(origin: SessionOrigin, code: FallbackCode, detail: string): Promise<FetchedConfig> {
+  const outbound = isOutbound(origin);
+  await remoteLog(
+    'agent',
+    'config_fallback_used',
+    outbound
+      ? `Outbound config unavailable (${detail}): the call is dropped before speaking.`
+      : `Tenant config unavailable (${detail}): the call runs on the neutral message-taking fallback, no tools.`,
+    'error',
+    { code, outbound },
+  );
+  if (outbound) throw new ConfigRefusedError('config_unavailable');
+  return defaultConfig();
 }
 
 /**
@@ -122,8 +155,8 @@ export async function fetchConfig(
   }
 
   if (!process.env['APP_URL']) {
-    console.warn('[config] APP_URL not set, using compiled defaults');
-    return defaultConfig();
+    console.warn('[config] APP_URL not set, using the neutral fallback');
+    return fallback(origin, 'app_url_unset', 'APP_URL not set');
   }
 
   try {
@@ -153,13 +186,18 @@ export async function fetchConfig(
       const log = configFallbackLog(res.status, path);
       if (log.level === 'error') console.error(log.message);
       else console.warn(log.message);
-      return defaultConfig();
+      return fallback(origin, `http_${res.status}`, `HTTP ${res.status}`);
     }
     const data = (await res.json()) as Partial<FetchedConfig>;
+    // A 200 without instructions is not a tenant config: never fill it in
+    // with a persona of our own.
+    if (typeof data.instructions !== 'string' || !data.instructions.trim()) {
+      return fallback(origin, 'missing_instructions', '200 without instructions');
+    }
 
     return {
-      instructions: data.instructions ?? FALLBACK_INSTRUCTIONS,
-      greetingInstructions: data.greetingInstructions ?? FALLBACK_GREETING,
+      instructions: data.instructions,
+      greetingInstructions: data.greetingInstructions ?? '',
       agentName: typeof data.agentName === 'string' ? data.agentName : '',
       realtimeProvider:
         data.realtimeProvider === 'gemini' || data.realtimeProvider === 'xai'
@@ -206,8 +244,8 @@ export async function fetchConfig(
   } catch (e) {
     if (e instanceof ConfigRefusedError) throw e;
     console.warn(
-      `[config] fetch failed (${(e as Error).message}), using defaults`,
+      `[config] fetch failed (${(e as Error).message}), using the neutral fallback`,
     );
-    return defaultConfig();
+    return fallback(origin, 'fetch_failed', `fetch failed: ${(e as Error).message.slice(0, 120)}`);
   }
 }
