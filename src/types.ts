@@ -96,26 +96,12 @@ export interface FetchedConfig {
    */
   perCallContextTemplate?: string;
   /**
-   * Base de connaissances tenant — array de business. Legacy 2026-05-28 :
-   * remplacé par `business` (structure complète). Conservé pour fallback
-   * worker pendant 1 release.
-   */
-  knowledge?: KnowledgeEntry[];
-  /**
    * Données business structurées du tenant : identité + centres (avec
    * horaires hebdo) + soins/tarifs. Exposé via 5 tools fixes côté worker
    * (list_centres, get_centre_info, get_opening_hours, list_services,
    * find_service) — voir `tools/business.ts`.
    */
   business?: BusinessConfig;
-}
-
-export interface KnowledgeEntry {
-  id: string;
-  toolName: string;
-  businessName: string;
-  openingHours: string;
-  description: string;
 }
 
 export type BusinessWeekDay =
