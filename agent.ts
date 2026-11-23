@@ -85,6 +85,7 @@ import { createCampaignProgressReporter } from './src/campaign-progress.js';
 import { computeCallCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
 import { enterSession, remoteLog } from './src/remote-log.js';
+import { logToolCall } from './src/tool-log.js';
 import { callIdFromRoomName } from './src/session-context.js';
 import { extractText } from './src/transcript.js';
 import type {
@@ -1200,6 +1201,7 @@ export default defineAgent<ProcessUserData>({
           .describe("Short reason: 'caller_asked_for_person', 'cannot_help', 'complaint', 'urgent'."),
       }),
       execute: async ({ reason }) => {
+        logToolCall('transfer_call', { reason });
         const why = (reason ?? 'caller_asked_for_person').trim() || 'caller_asked_for_person';
         if (transferState.attempted) return 'A transfer is already in progress. Say nothing more.';
         if (!canTransfer) {
@@ -1259,6 +1261,7 @@ export default defineAgent<ProcessUserData>({
           ),
       }),
       execute: async ({ reason }) => {
+        logToolCall('end_call', { reason });
         const r = (reason ?? 'llm_end').trim() || 'llm_end';
         // Don't close immediately — the LLM emits the tool call AT THE
         // SAME TIME as the goodbye audio. Wait for the agent state to
