@@ -1,13 +1,7 @@
 import { createHmac } from 'node:crypto';
-import https from 'node:https';
 
-import {
-  checkUrlShape,
-  guardedLookup,
-  UnsafeAddressError,
-  type Resolver,
-  type UnsafeReason,
-} from './net/safe-url.js';
+import { postToAgent, type AgentPostDeps } from './net/agent-post.js';
+import { checkUrlShape, type UnsafeReason } from './net/safe-url.js';
 import { remoteLog } from './remote-log.js';
 import { callIdFromRoomName } from './session-context.js';
 
@@ -56,11 +50,10 @@ export function stallLine(language: string): string {
   return STALL[language] ?? STALL['en']!;
 }
 
-/** Injectable for tests: DNS resolver and the https request function. */
-export interface WebhookDeps {
-  resolve?: Resolver;
-  request?: typeof https.request;
-}
+/** Injectable for tests: DNS resolver, the https request function, the pool. */
+export type WebhookDeps = AgentPostDeps;
+
+export { MAX_RESPONSE_BYTES } from './net/agent-post.js';
 
 export interface WebhookResult {
   reply: string | null;
@@ -141,7 +134,7 @@ export async function callAgentWebhook(
   const shape = checkUrlShape(config.url);
   if (!shape.ok) return refused(shape.reason, startedAt);
 
-  const outcome = await postToAgent(new URL(config.url), headers, body, deps);
+  const outcome = await postToAgent(new URL(config.url), headers, body, { budgetMs: TURN_BUDGET_MS }, deps);
   const elapsedMs = Date.now() - startedAt;
 
   if (outcome.kind === 'refused') {
@@ -185,87 +178,4 @@ function refused(reason: UnsafeReason, startedAt: number): WebhookResult {
     { reason },
   );
   return { reply: null, elapsedMs: Date.now() - startedAt, failure: 'unsafe_url' };
-}
-
-/** Largest reply body read from the customer's agent; beyond it → 'shape'. */
-export const MAX_RESPONSE_BYTES = 64 * 1024;
-
-/**
- * Dedicated keep-alive pool: every socket in it was opened through
- * guardedLookup, so a reused socket is one whose address was checked.
- */
-const webhookAgent = new https.Agent({ keepAlive: true });
-
-type PostOutcome =
-  | { kind: 'response'; status: number; text: string; tooLarge: boolean }
-  | { kind: 'refused'; reason: UnsafeReason }
-  | { kind: 'failed'; failure: 'timeout' | 'network' };
-
-/**
- * POST over node:https with a connect-time address check. Never rejects.
- * The whole exchange (DNS, connect, TLS, response) fits in TURN_BUDGET_MS.
- */
-function postToAgent(
-  url: URL,
-  headers: Record<string, string>,
-  body: string,
-  deps: WebhookDeps,
-): Promise<PostOutcome> {
-  const request = deps.request ?? https.request;
-  return new Promise<PostOutcome>((resolve) => {
-    let settled = false;
-    const done = (outcome: PostOutcome) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(outcome);
-    };
-
-    const req = request(
-      {
-        protocol: 'https:',
-        hostname: url.hostname,
-        port: url.port || 443,
-        path: `${url.pathname}${url.search}`,
-        method: 'POST',
-        headers: { ...headers, 'Content-Length': String(Buffer.byteLength(body)) },
-        lookup: guardedLookup(deps.resolve),
-        agent: deps.request ? undefined : webhookAgent,
-      },
-      (res) => {
-        const status = res.statusCode ?? 0;
-        if (status < 200 || status >= 300) {
-          res.resume();
-          done({ kind: 'response', status, text: '', tooLarge: false });
-          return;
-        }
-        const chunks: Buffer[] = [];
-        let size = 0;
-        res.on('data', (chunk: Buffer) => {
-          size += chunk.length;
-          if (size > MAX_RESPONSE_BYTES) {
-            done({ kind: 'response', status, text: '', tooLarge: true });
-            res.destroy();
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on('end', () => {
-          done({ kind: 'response', status, text: Buffer.concat(chunks).toString('utf8'), tooLarge: false });
-        });
-        res.on('error', () => done({ kind: 'failed', failure: 'network' }));
-      },
-    );
-
-    const timer = setTimeout(() => {
-      done({ kind: 'failed', failure: 'timeout' });
-      req.destroy();
-    }, TURN_BUDGET_MS);
-
-    req.on('error', (err: Error) => {
-      if (err instanceof UnsafeAddressError) done({ kind: 'refused', reason: err.reason });
-      else done({ kind: 'failed', failure: 'network' });
-    });
-    req.end(body);
-  });
 }
