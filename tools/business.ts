@@ -17,6 +17,7 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+import { logToolCall } from '../src/tool-log.js';
 import type { BusinessConfig, BusinessWeekDay } from '../src/types.js';
 
 // Anonymous tool keyed by its model-visible name (agents >= 1.9: a map of
@@ -139,6 +140,7 @@ export function makeBusinessTools(
         "Liste tous les centres du business du tenant avec leurs ids, noms et addresses. Appelle ce tool pour aiguiller le client vers le bon centre ou avant d'appeler get_centre_info / get_opening_hours.",
       parameters: z.object({}),
       execute: async () => {
+        logToolCall('list_centres', {});
         if (business.centres.length === 0) {
           return 'Aucun centre défini pour ce tenant.';
         }
@@ -159,6 +161,7 @@ export function makeBusinessTools(
           .describe("L'id du centre (ex: ctr_abc) OU le nom (ex: 'Jerusalem')."),
       }),
       execute: async ({ centreId }) => {
+        logToolCall('get_centre_info', { centreId });
         const c = findCentre(business, centreId);
         if (!c) return `Centre introuvable : "${centreId}". Appelle list_centres pour voir les centres disponibles.`;
         const addrLine = c.address ? `Adresse : ${c.address}.` : '';
@@ -186,6 +189,7 @@ export function makeBusinessTools(
           ),
       }),
       execute: async ({ centreId, day, isoDate }) => {
+        logToolCall('get_opening_hours', { centreId, day, isoDate });
         const c = findCentre(business, centreId);
         if (!c) return `Centre introuvable : "${centreId}".`;
         let resolvedDay: WeekDay | null = (day as WeekDay) ?? null;
@@ -214,6 +218,7 @@ export function makeBusinessTools(
           .describe("Optionnel — filtre les services dispo à ce centre."),
       }),
       execute: async ({ centreId }) => {
+        logToolCall('list_services', { centreId });
         const matched = servicesForCentre(business, centreId);
         if (matched.length === 0) {
           return centreId
@@ -238,6 +243,7 @@ export function makeBusinessTools(
           .describe("Optionnel — restreint la recherche à ce centre."),
       }),
       execute: async ({ query, centreId }) => {
+        logToolCall('find_service', { query, centreId });
         const pool = servicesForCentre(business, centreId);
         const q = query.toLowerCase().trim();
         if (!q) return 'Query vide — précise un mot-clé.';
