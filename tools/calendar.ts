@@ -1,6 +1,7 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+import { logToolCall } from '../src/tool-log.js';
 import { webPost } from '../src/web-api.js';
 
 export interface ToolFeatures {
@@ -75,32 +76,54 @@ const formatSuggested = (suggested?: SuggestedDate[]): string =>
     ? suggested.map((d) => `${d.weekday} ${d.date}`).join(', ')
     : '';
 
+/** /api/calendar/list-dates response. `requested_date` / `requested_date_open`
+ *  only come from a web that treats `after` as inclusive; an older web omits
+ *  them. */
+export interface ListDatesResponse {
+  center: string;
+  label: string;
+  dates: SuggestedDate[];
+  error?: string;
+  requested_date?: string;
+  requested_date_open?: boolean;
+}
+
+/** Tool output for list_available_dates. Without `requested_date_open` the
+ *  text is exactly the historical one; with it, a plain sentence about the
+ *  asked date comes first so the model can't misread the list. */
+export const formatListDates = (data: ListDatesResponse): string => {
+  if (data.error) return `Erreur : ${data.error}`;
+  const dates = data.dates ?? [];
+  const list =
+    dates.length === 0
+      ? `Aucune date trouvée pour ${data.label}.`
+      : `Prochaines dates ouvertes à ${data.label} : ${formatSuggested(dates)}.`;
+  if (typeof data.requested_date_open !== 'boolean' || !data.requested_date) return list;
+  const verdict = data.requested_date_open
+    ? `Le ${data.requested_date} est ouvert à ${data.label}.`
+    : `Le ${data.requested_date} n'est pas ouvert à ${data.label}.`;
+  return `${verdict} ${list}`;
+};
+
 export const makeCalendarTools = (ctx: ToolContext) => {
   const post = makePost(ctx);
 
   const listAvailableDates = llm.tool({
     description:
-      "Renvoie les prochaines dates valides pour un centre donné — déterministe, source de vérité. À APPELER systématiquement avant de proposer une date à la cliente : NE devine JAMAIS quel jour de la semaine correspond à quel centre, demande ce tool. Utile aussi quand la cliente dit 'je veux Jérusalem la semaine prochaine' → tu obtiens directement les dates ouvertes.",
+      "Renvoie les prochaines dates valides pour un centre donné — déterministe, source de vérité. À APPELER systématiquement avant de proposer une date à la cliente : NE devine JAMAIS quel jour de la semaine correspond à quel centre, demande ce tool. Utile aussi quand la cliente dit 'je veux Jérusalem la semaine prochaine' → tu obtiens directement les dates ouvertes. Quand la cliente demande un jour précis (ex. 'demain'), passe `after` = CETTE date (YYYY-MM-DD) pour la vérifier : la réponse dit alors en clair « Le <date> est ouvert / n'est pas ouvert à <centre> ». Ne conclus JAMAIS qu'un jour est fermé sans cette phrase « n'est pas ouvert » OU sans avoir appelé check_availability pour ce jour — une date absente de la liste ne veut PAS dire fermé.",
     parameters: z.object({
       center: CENTER_ENUM.describe("Centre voulu par la cliente (jerusalem, ashdod, natanya)."),
       count: z.number().int().nullish().describe("Combien de prochaines dates retourner (défaut 3, max 10)."),
-      after: z.string().nullish().describe("Optionnel : YYYY-MM-DD à partir de laquelle chercher (exclusif). Sinon, à partir d'aujourd'hui."),
+      after: z.string().nullish().describe("Optionnel : YYYY-MM-DD à partir de laquelle chercher, INCLUSE — passe la date demandée par la cliente pour la vérifier. Sinon, à partir d'aujourd'hui."),
     }),
     execute: async ({ center, count, after }) => {
-      const data = await post<{
-        center: string;
-        label: string;
-        dates: SuggestedDate[];
-        error?: string;
-      }>('/api/calendar/list-dates', {
+      logToolCall('list_available_dates', { center, count, after });
+      const data = await post<ListDatesResponse>('/api/calendar/list-dates', {
         center,
         count: count ?? 3,
         after: after ?? undefined,
       });
-      if (data.error) return `Erreur : ${data.error}`;
-      const dates = data.dates ?? [];
-      if (dates.length === 0) return `Aucune date trouvée pour ${data.label}.`;
-      return `Prochaines dates ouvertes à ${data.label} : ${formatSuggested(dates)}.`;
+      return formatListDates(data);
     },
   });
 
@@ -119,6 +142,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         .describe("Durée de la prestation en minutes (60 soin de la peau, 30 épilation, défaut 30). Indispensable pour que les créneaux renvoyés tiennent vraiment."),
     }),
     execute: async ({ date, center, duration }) => {
+      logToolCall('check_availability', { date, center, duration });
       const data = await post<{
         date: string;
         center?: string;
@@ -179,6 +203,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         .describe("Durée en minutes (60 pour soins de la peau, 30 pour épilation, défaut 30)."),
     }),
     execute: async ({ name, phone, date, time, center, description, email, duration }) => {
+      logToolCall('book_appointment', { name, phone, date, time, center, description, email, duration });
       // Fallback caller-ID si le LLM ne fournit pas phone. Évite que
       // l'agent demande au client un numéro déjà connu via Twilio.
       const resolvedPhone =
@@ -258,6 +283,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       notes: z.string().nullish().describe("Notes libres."),
     }),
     execute: async ({ name, phone, email, notes }) => {
+      logToolCall('save_contact', { name, phone, email, notes });
       const resolvedPhone =
         (phone && phone.trim().length > 0 ? phone : null) ??
         ctx.getCallerPhone?.() ??
@@ -281,6 +307,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       date: z.string().nullish().describe("Optionnel : limite la recherche à cette date (YYYY-MM-DD). Sinon cherche les 30 prochains jours."),
     }),
     execute: async ({ phone, date }) => {
+      logToolCall('find_appointment', { phone, date });
       const data = await post<{
         events?: { eventId: string; summary: string; start: string; end: string }[];
         error?: string;
@@ -304,6 +331,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       event_id: z.string().describe("Identifiant Google Calendar de l'événement à supprimer."),
     }),
     execute: async ({ event_id }) => {
+      logToolCall('cancel_appointment', { event_id });
       const data = await post<{ success?: boolean; message?: string; error?: string }>(
         '/api/calendar/cancel',
         { eventId: event_id },
@@ -325,6 +353,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       duration: z.number().int().nullish().describe("Durée en minutes. Si omis, garde la durée actuelle."),
     }),
     execute: async ({ event_id, new_date, new_time, center, duration }) => {
+      logToolCall('reschedule_appointment', { event_id, new_date, new_time, center, duration });
       const data = await post<{
         success?: boolean;
         summary?: string;

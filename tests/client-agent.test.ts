@@ -2,16 +2,23 @@
 // src/vox-brain.ts). Mock URLs, ids and business data only.
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import type https from 'node:https';
+import { Readable } from 'node:stream';
 
 import {
+  CLIENT_AGENT_BUDGET_MS,
   CLIENT_AGENT_HISTORY_TURNS,
   askClientAgent,
   buildClientAgentRequest,
   isVoxToolCall,
   toolResultText,
 } from '../src/client-agent.js';
+import { createAgentPool, MAX_RESPONSE_BYTES } from '../src/net/agent-post.js';
+import type { ResolvedAddress, Resolver } from '../src/net/safe-url.js';
 import { voxBrainInstructions } from '../src/vox-brain.js';
 import { makeClientAgentTools } from '../tools/client-agent.js';
+import { depsWith, startServer } from './helpers/agent-test-server.js';
 
 const hook = { url: 'https://agent.example.test/hook', secret: 'test-secret' };
 
@@ -51,39 +58,153 @@ assert.equal(req.question, 'Est-ce que la commande 0000 est prête ?');
 assert.equal(req.history.length, CLIENT_AGENT_HISTORY_TURNS);
 assert.equal(req.history[0]?.text, 't4');
 
-// ── 3. webhook call (mocked fetch)
-const respond = (status: number, body: string, delayMs = 0) =>
-  (async (_u: string, init?: { signal?: AbortSignal }) => {
-    if (delayMs) {
-      await new Promise((r, rej) => {
-        const t = setTimeout(r, delayMs);
-        init?.signal?.addEventListener('abort', () => {
-          clearTimeout(t);
-          rej(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-        });
-      });
-    }
-    return new Response(body, { status });
-  }) as unknown as typeof fetch;
+// ── 3. webhook call, through the shared poster (src/net/agent-post.ts)
+// Fake https.request. Like a real socket, it calls options.lookup (the
+// poster's connect-time address guard) before connecting, and only "sends"
+// the body once the lookup has succeeded.
+interface Sent { connectedTo: string; headers: Record<string, string>; body: string }
+const sent: Sent[] = [];
+let reply: { status: number; body: string | Buffer } = { status: 200, body: '{}' };
+const fakeRequest = ((options: https.RequestOptions, onResponse: (res: Readable & { statusCode?: number }) => void) => {
+  const r = new EventEmitter() as EventEmitter & { end: (b: string) => void; destroy: () => void };
+  r.destroy = () => {};
+  r.end = (body: string) => {
+    const lookup = options.lookup as unknown as (
+      h: string, o: { all: boolean }, cb: (err: Error | null, a: ResolvedAddress[]) => void,
+    ) => void;
+    lookup(String(options.hostname), { all: true }, (err, addresses) => {
+      if (err) { r.emit('error', err); return; }
+      sent.push({ connectedTo: addresses[0]!.address, headers: options.headers as Record<string, string>, body });
+      const res = Readable.from([Buffer.isBuffer(reply.body) ? reply.body : Buffer.from(reply.body)]) as Readable & { statusCode?: number };
+      res.statusCode = reply.status;
+      onResponse(res);
+    });
+  };
+  return r;
+}) as unknown as typeof https.request;
+const PUBLIC: ResolvedAddress = { address: '93.184.216.34', family: 4 };
+const fakeDeps = (resolve: Resolver = async () => [PUBLIC]) => ({ deps: { resolve, request: fakeRequest } });
+const answerWith = async (status: number, body: string | Buffer) => {
+  reply = { status, body };
+  return askClientAgent(hook, req, fakeDeps());
+};
 
-let seen: { headers: Record<string, string>; body: string } | null = null;
-const capture = (async (_u: string, init: { headers: Record<string, string>; body: string }) => {
-  seen = { headers: init.headers, body: init.body };
-  return new Response(JSON.stringify({ answer: 'Prête, retrait dès 14 h, 12,50 €.' }), { status: 200 });
-}) as unknown as typeof fetch;
-const ok = await askClientAgent(hook, req, { fetchImpl: capture });
-assert.equal(ok.answer, 'Prête, retrait dès 14 h, 12,50 €.');
-assert.equal(
-  seen!.headers['X-Tamara-Signature'],
-  createHmac('sha256', 'test-secret').update(seen!.body).digest('hex'),
-  'HMAC over the exact body',
-);
-assert.deepEqual(Object.keys(JSON.parse(seen!.body)).sort(), ['call_id', 'caller_said', 'history', 'language', 'question', 'turn_id']);
-assert.equal((await askClientAgent(hook, req, { fetchImpl: respond(200, '{"reply":"legacy"}') })).answer, 'legacy');
-assert.equal((await askClientAgent(hook, req, { fetchImpl: respond(500, '{}') })).failure, 'http');
-assert.equal((await askClientAgent(hook, req, { fetchImpl: respond(200, 'not json') })).failure, 'shape');
-assert.equal((await askClientAgent(hook, req, { fetchImpl: respond(200, '{"answer":""}') })).failure, 'shape');
-assert.equal((await askClientAgent(hook, req, { fetchImpl: respond(200, '{}', 200), budgetMs: 50 })).failure, 'timeout');
+{
+  // answer, signed over the exact body, contract keys only
+  const ok = await answerWith(200, JSON.stringify({ answer: 'Prête, retrait dès 14 h, 12,50 €.' }));
+  assert.equal(ok.answer, 'Prête, retrait dès 14 h, 12,50 €.');
+  assert.equal(ok.failure, undefined);
+  assert.equal(ok.status, 200);
+  const seen = sent.at(-1)!;
+  assert.equal(seen.connectedTo, PUBLIC.address, 'socket connects to the checked address');
+  assert.equal(
+    seen.headers['X-Tamara-Signature'],
+    createHmac('sha256', 'test-secret').update(seen.body).digest('hex'),
+    'HMAC over the exact body',
+  );
+  assert.equal(seen.body, JSON.stringify(req));
+  assert.deepEqual(Object.keys(JSON.parse(seen.body)).sort(), ['call_id', 'caller_said', 'history', 'language', 'question', 'turn_id']);
+}
+assert.equal((await answerWith(200, '{"reply":"legacy"}')).answer, 'legacy', 'legacy reply field still accepted');
+assert.equal((await answerWith(200, '{"answer":"new","reply":"legacy"}')).answer, 'new', 'answer wins over reply');
+{
+  const r = await answerWith(500, '{}');
+  assert.equal(r.failure, 'http');
+  assert.equal(r.status, 500);
+}
+assert.equal((await answerWith(302, '{"answer":"x"}')).failure, 'http', 'redirects are not followed');
+assert.equal((await answerWith(200, 'not json')).failure, 'shape');
+assert.equal((await answerWith(200, '{"answer":""}')).failure, 'shape');
+{
+  // response size limit: a body over MAX_RESPONSE_BYTES is a shape failure
+  const huge = Buffer.from(JSON.stringify({ answer: 'x'.repeat(MAX_RESPONSE_BYTES + 1) }));
+  assert.equal((await answerWith(200, huge)).failure, 'shape');
+}
+{
+  // unsigned without a secret
+  reply = { status: 200, body: '{"answer":"ok"}' };
+  await askClientAgent({ url: hook.url }, req, fakeDeps());
+  assert.equal(sent.at(-1)!.headers['X-Tamara-Signature'], undefined);
+}
+
+// ── 3b. unsafe address: refused, no request sent, Tamara says she can't check
+{
+  const quiet = console.log;
+  console.log = () => {};
+  const before = sent.length;
+  const priv = await askClientAgent(hook, req, fakeDeps(async () => [{ address: '10.0.0.5', family: 4 }]));
+  const meta = await askClientAgent(hook, req, fakeDeps(async () => [{ address: '169.254.169.254', family: 4 }]));
+  const literal = await askClientAgent({ ...hook, url: 'https://192.168.1.10/hook' }, req, fakeDeps());
+  const plain = await askClientAgent({ ...hook, url: 'http://agent.example.test/hook' }, req, fakeDeps());
+  const noDns = await askClientAgent(hook, req, fakeDeps(async () => { throw new Error('ENOTFOUND'); }));
+  console.log = quiet;
+  assert.equal(sent.length, before, 'no request sent to a refused address');
+  for (const r of [priv, meta, literal, plain]) {
+    assert.equal(r.answer, null);
+    assert.equal(r.failure, 'unsafe_url');
+    assert.match(toolResultText(r), /can't check this right now/);
+    assert.doesNotMatch(toolResultText(r), /answered/);
+  }
+  assert.equal(noDns.failure, 'network', 'a host that does not resolve is a network failure');
+}
+
+// ── 3c. real node:https against a local TLS server (shared test helpers)
+{
+  const url = (port: number) => `https://agent.example.com:${port}/hook`;
+  const quiet = console.log;
+  const logs: string[] = [];
+  console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+
+  // a stale reused keep-alive socket: exactly one retry on a fresh connection, then the answer
+  {
+    const server = await startServer('ok');
+    const used = new Set<number>();
+    server.override = ({ socketId }, res, sock) => {
+      // Like a proxy that dropped the idle flow: a reused socket dies unanswered.
+      if (used.has(socketId)) { sock.destroy(); return true; }
+      used.add(socketId);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ answer: 'Prête, retrait dès 14 h.' }));
+      return true;
+    };
+    const pool = createAgentPool();
+    const first = await askClientAgent({ ...hook, url: url(server.port) }, req, { deps: depsWith(pool) });
+    assert.equal(first.answer, 'Prête, retrait dès 14 h.');
+    await new Promise((r) => setTimeout(r, 500));
+    const second = await askClientAgent({ ...hook, url: url(server.port) }, req, { deps: depsWith(pool) });
+    assert.equal(second.answer, 'Prête, retrait dès 14 h.');
+    assert.equal(second.failure, undefined);
+    assert.equal(logs.filter((l) => l.startsWith('[agent_post] retry on fresh connection')).length, 1, 'exactly one retry');
+    assert.equal(server.seen.length, 3, 'first, failed reuse, retry');
+    assert.equal(server.seen[1]!.socketId, server.seen[0]!.socketId, 'the failed attempt reused the socket');
+    assert.notEqual(server.seen[2]!.socketId, server.seen[1]!.socketId, 'the retry used a fresh connection');
+    const expected = createHmac('sha256', 'test-secret').update(JSON.stringify(req)).digest('hex');
+    for (const s of server.seen) {
+      assert.equal(s.headers['x-tamara-signature'], expected, 'signature correct on every attempt, retry included');
+      assert.equal(s.body, JSON.stringify(req));
+    }
+    pool.destroy();
+    await server.close();
+  }
+
+  // a client agent that never answers: timeout at the 2.5 s budget, not later
+  {
+    const server = await startServer('ok');
+    server.override = () => true; // never answers
+    const pool = createAgentPool();
+    const started = Date.now();
+    const r = await askClientAgent({ ...hook, url: url(server.port) }, req, { deps: depsWith(pool) });
+    const elapsed = Date.now() - started;
+    assert.equal(CLIENT_AGENT_BUDGET_MS, 2500);
+    assert.equal(r.failure, 'timeout');
+    assert.equal(r.answer, null);
+    assert.ok(elapsed >= CLIENT_AGENT_BUDGET_MS - 20 && elapsed < CLIENT_AGENT_BUDGET_MS + 400, `deadline is the budget (${elapsed}ms)`);
+    assert.match(toolResultText(r), /can't check this right now/);
+    pool.destroy();
+    await server.close();
+  }
+  console.log = quiet;
+}
 
 // ── 4. tool result: facts verbatim, failure → take a message
 const text = toolResultText({ answer: 'Prête, retrait dès 14 h, 12,50 €.', elapsedMs: 1 });
