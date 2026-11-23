@@ -119,6 +119,10 @@ export const SPEAKABLE_REFUSALS: readonly { name: string; test: (error: string) 
   { name: 'invalid_datetime', test: (e) => /^Date\/heure invalide : /.test(e) },
   // book / reschedule: "Le créneau … est déjà passé. …"
   { name: 'past_slot', test: (e) => /^Le créneau .* est déjà passé\./.test(e) },
+  // lib/booking-request (book): "Heure invalide : … (format attendu HH:MM, …)"
+  { name: 'invalid_time', test: (e) => /^Heure invalide : /.test(e) },
+  // lib/booking-request (book): "Durée invalide : … (minutes, entier entre …)"
+  { name: 'invalid_duration', test: (e) => /^Durée invalide : /.test(e) },
 ];
 
 /** The body itself when its refusal is allowlisted and nothing in it holds a
