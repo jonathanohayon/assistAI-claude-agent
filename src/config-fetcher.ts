@@ -32,6 +32,8 @@ import {
   refusalFromResponse,
 } from './config-refusal.js';
 import { fetchVoxConfigByPhone, voxInstructions } from './vox-config.js';
+import { voxToolModeEnabled } from './client-agent.js';
+import { voxBrainInstructions } from './vox-brain.js';
 import { webGet } from './web-api.js';
 import { parseClientProfile } from './client-profile.js';
 
@@ -95,9 +97,9 @@ export async function fetchConfig(
         `[config] agent Tamara « ${vox.name} » (${vox.id}) pour ${origin.calledNumber}`,
       );
       return {
-        // Le modèle ne porte plus de persona : il prononce ce que le webhook
-        // renvoie, avec la diction demandée.
-        instructions: voxInstructions(vox),
+        // Tool mode (default): Tamara is the brain, the client's agent is the
+        // ask_client_agent tool. VOX_VERBATIM=1: legacy diction-only prompt.
+        instructions: voxToolModeEnabled() ? voxBrainInstructions(vox) : voxInstructions(vox),
         greetingInstructions: '',
         agentName: vox.name,
         model: REALTIME_CONFIG.model,

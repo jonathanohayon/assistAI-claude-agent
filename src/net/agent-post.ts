@@ -4,7 +4,7 @@ import { guardedLookup, UnsafeAddressError, type Resolver, type UnsafeReason } f
 
 /**
  * The one HTTPS poster for every call to a customer's agent (the old own-agent
- * webhook today; ask_client_agent and T5c adopt it next).
+ * webhook and ask_client_agent today; T5c adopts it next).
  *
  * Contract:
  * - never rejects: every failure is an outcome;
