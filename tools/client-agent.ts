@@ -43,29 +43,48 @@ export function makeClientAgentTools(deps: ClientAgentToolDeps) {
     execute: async ({ question }) => {
       turnId += 1;
       const id = turnId;
-      const language = deps.getLanguage();
-      const callerSaid = deps.getCallerSaid();
       let cancelStall: (() => void) | null = null;
-      const stallTimer = setTimeout(() => {
-        cancelStall = deps.startStall?.() ?? null;
-      }, CLIENT_AGENT_STALL_MS);
-      const result = await (deps.ask ?? askClientAgent)(
-        deps.webhook,
-        buildClientAgentRequest({
-          callId: deps.getCallId(),
-          turnId: id,
-          language,
-          question,
-          callerSaid,
-          history: deps.getHistory(),
-        }),
-      );
-      clearTimeout(stallTimer);
-      // An answer that beats the holding line must not be followed by it.
-      (cancelStall as (() => void) | null)?.();
-      console.log(`[client_agent] turn ${id} → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
-      deps.onResult?.({ ...result, turnId: id, question, callerSaid, language });
-      return toolResultText(result);
+      let stallTimer: ReturnType<typeof setTimeout> | undefined;
+      // Never throw out of a tool call: a throw would leave the model with no
+      // result and the caller with silence. Any error = "the system did not
+      // answer", and the model says so on its own (toolResultText).
+      try {
+        const language = deps.getLanguage();
+        const callerSaid = deps.getCallerSaid();
+        stallTimer = setTimeout(() => {
+          cancelStall = deps.startStall?.() ?? null;
+        }, CLIENT_AGENT_STALL_MS);
+        const result = await (deps.ask ?? askClientAgent)(
+          deps.webhook,
+          buildClientAgentRequest({
+            callId: deps.getCallId(),
+            turnId: id,
+            language,
+            question,
+            callerSaid,
+            history: deps.getHistory(),
+          }),
+        );
+        clearTimeout(stallTimer);
+        // An answer that beats the holding line must not be followed by it.
+        (cancelStall as (() => void) | null)?.();
+        console.log(`[client_agent] turn ${id} → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
+        try {
+          deps.onResult?.({ ...result, turnId: id, question, callerSaid, language });
+        } catch {
+          /* monitoring never changes what the model is told */
+        }
+        return toolResultText(result);
+      } catch (e) {
+        if (stallTimer) clearTimeout(stallTimer);
+        try {
+          (cancelStall as (() => void) | null)?.();
+        } catch {
+          /* holding line already gone */
+        }
+        console.log(`[client_agent] turn ${id} → error (${(e as Error)?.name ?? 'Error'})`);
+        return toolResultText({ answer: null, elapsedMs: 0, failure: 'network' });
+      }
     },
   });
   return { ask_client_agent };

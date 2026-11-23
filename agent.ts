@@ -93,8 +93,8 @@ import type {
 } from './src/types.js';
 import { makeBusinessTools } from './tools/business.js';
 import { makeCalendarTools } from './tools/calendar.js';
-import { makeClientAgentTools } from './tools/client-agent.js';
-import { isVoxToolCall } from './src/client-agent.js';
+import { makeClientAgentTools, type ClientAgentToolDeps } from './tools/client-agent.js';
+import { clientAgentOpening, runClientAgentVoiceTurn, selectBrainPlan, urlHost } from './src/brain-mode.js';
 import { makeKnowledgeTools } from './tools/knowledge.js';
 import { makeOrdersTools } from './tools/orders.js';
 
@@ -253,17 +253,42 @@ export default defineAgent<ProcessUserData>({
     // Quand le tenant a branché son propre agent, le modèle Realtime cesse
     // d'être le cerveau : il transcrit et il parle, et chaque tour part vers
     // le endpoint du client. Absent → comportement historique intact.
-    const agentWebhook = cfg.agentWebhook;
+    // Brain selection (src/brain-mode.ts): tamaravox keeps #31's behaviour;
+    // T5c clientAgent ("lead" = tool, "voice" = verbatim) wins over the legacy
+    // agentWebhook; no clientAgent → exactly the previous selection.
+    const { plan: brainPlan, overridesLegacyWebhook } = selectBrainPlan(cfg);
     // tamaravox tool mode (src/client-agent.ts): Tamara stays the brain and
     // the client's agent is the ask_client_agent tool. Only for tamaravox
     // configs; then the legacy verbatim mode below is OFF for this call.
-    const voxToolMode = isVoxToolCall(cfg);
-    const webhookMode = Boolean(agentWebhook?.url) && !voxToolMode;
+    const voxToolMode = brainPlan.kind === 'tool' && brainPlan.source === 'vox';
+    // T5c "lead": same tool, pointed at clientAgent.url.
+    const clientAgentLead = brainPlan.kind === 'tool' && brainPlan.source === 'client_agent';
+    const toolEndpoint = brainPlan.kind === 'tool' ? brainPlan.endpoint : undefined;
+    // Verbatim (create_response off): legacy webhook, or T5c "voice".
+    const webhookMode = brainPlan.kind === 'verbatim';
+    const agentWebhook = brainPlan.kind === 'verbatim' ? brainPlan.endpoint : undefined;
+    const clientAgentVoice = brainPlan.kind === 'verbatim' && brainPlan.contract === 'client_agent';
     if (voxToolMode) {
-      console.log(`[client_agent] tool mode → ${agentWebhook!.url}`);
+      console.log(`[client_agent] tool mode → ${toolEndpoint!.url}`);
     }
-    if (webhookMode) {
+    if (clientAgentLead) {
+      console.log(`[client_agent] lead mode → ${urlHost(toolEndpoint!.url)}`);
+    }
+    if (clientAgentVoice) {
+      console.log(`[client_agent] voice mode → ${urlHost(agentWebhook!.url)}`);
+    } else if (webhookMode) {
       console.log(`[webhook_agent] mode actif → ${agentWebhook!.url}`);
+    }
+    if (overridesLegacyWebhook) {
+      // Ids only: the hashed call id, never a url, a secret or the room name.
+      console.warn('[client_agent] client_agent_overrides_legacy_webhook');
+      void remoteLog(
+        'agent',
+        'client_agent_overrides_legacy_webhook',
+        'clientAgent present: the legacy agentWebhook is ignored for this call',
+        'warn',
+        { callId: currentCallId() ?? '', mode: cfg.clientAgent?.mode ?? '' },
+      );
     }
     tConfigFetched = Date.now();
     // fire-and-forget : ne jamais bloquer le chemin d'appel sur la télémétrie
@@ -643,6 +668,11 @@ export default defineAgent<ProcessUserData>({
 
     // ── Transcript capture ──────────────────────────────────────────────
     const transcript: TranscriptEntry[] = [];
+    /** T5c: the caller's language for the customer's agent (Hebrew sniffed, else the tenant's). */
+    const callerLanguage = (): string => {
+      const lastUser = [...transcript].reverse().find((t) => t.role === 'user');
+      return lastUser && sniffLang(lastUser.text) === 'he' ? 'he' : (cfg.primaryLanguage ?? 'fr');
+    };
     // État du mode BYO-agent : un tour à la fois, numérotés pour les logs.
     let webhookTurnInFlight = false;
     let webhookTurnId = 0;
@@ -782,6 +812,28 @@ export default defineAgent<ProcessUserData>({
       webhookTurnInFlight = true;
       webhookTurnId += 1;
       const turnId = webhookTurnId;
+
+      if (clientAgentVoice) {
+        // T5c "voice": new contract, hashed call id, never throws, never
+        // silent (holding line, then the answer or an apology line).
+        void runClientAgentVoiceTurn({
+          endpoint: agentWebhook,
+          callId: currentCallId() ?? callIdFromRoomName(ctx.room.name ?? 'call'),
+          turnId,
+          language: callerLanguage(),
+          callerSaid: text,
+          history: transcript.map((entry) => ({
+            role: entry.role === 'assistant' ? ('agent' as const) : ('user' as const),
+            text: entry.text,
+          })),
+          speak: speakVerbatim,
+        })
+          .catch(() => 'error')
+          .finally(() => {
+            webhookTurnInFlight = false;
+          });
+        return;
+      }
 
       void (async () => {
         // Filet anti-silence : si le client dépasse ~700 ms, on meuble. Un
@@ -1381,7 +1433,9 @@ export default defineAgent<ProcessUserData>({
         // Gemini POC: the pre-rendered opener is OpenAI TTS in the tenant's
         // OpenAI voice; playing it would give the call two different voices.
         // Let Gemini speak the greeting itself.
-        const opener = realtimeProvider === 'gemini' ? null : await openerPromise;
+        // T5c "voice": the opening line belongs to the customer's agent, so
+        // the tenant's pre-rendered opener is not played.
+        const opener = realtimeProvider === 'gemini' || clientAgentVoice ? null : await openerPromise;
         if (opener) {
           try {
             this.session.input.setAudioEnabled(false);
@@ -1415,7 +1469,19 @@ export default defineAgent<ProcessUserData>({
         // dirait au client des choses que son agent n'a jamais écrites. On
         // demande le tour 0 au endpoint, et on ne retombe sur le modèle que
         // s'il ne répond pas.
-        if (webhookMode && agentWebhook) {
+        if (clientAgentVoice && agentWebhook) {
+          const answer = await clientAgentOpening({
+            endpoint: agentWebhook,
+            callId: currentCallId() ?? callIdFromRoomName(ctx.room.name ?? 'call'),
+            language: cfg.primaryLanguage ?? 'fr',
+          });
+          if (answer) {
+            await speakVerbatim(answer);
+            greetingSource = 'webhook';
+            return;
+          }
+          // No answer → the model greeting below, as in the legacy mode.
+        } else if (webhookMode && agentWebhook) {
           const opening = await callAgentWebhook(agentWebhook, {
             callId: ctx.room.name ?? 'call',
             turnId: 0,
@@ -1602,10 +1668,12 @@ export default defineAgent<ProcessUserData>({
     //   - greetingInstructions : phrase d'accueil littérale.
     // Loggé une seule fois par session — taille typique 8-12kB metadata.
     // tamaravox tool mode only: aitamara calls get no extra tool.
+    // T5c "lead": the same tool, pointed at clientAgent.url (no tamaravox
+    // monitoring: that is for tamaravox agents only).
     const clientAgentTools =
-      voxToolMode && agentWebhook
+      (voxToolMode || clientAgentLead) && toolEndpoint
         ? makeClientAgentTools({
-            webhook: agentWebhook,
+            webhook: toolEndpoint,
             getCallId: () => currentCallId() ?? 'call',
             getLanguage: () => {
               const lastUser = [...transcript].reverse().find((t) => t.role === 'user');
@@ -1642,7 +1710,7 @@ export default defineAgent<ProcessUserData>({
                 }
               };
             },
-            onResult: (r) =>
+            ...(voxToolMode ? { onResult: (r: Parameters<NonNullable<ClientAgentToolDeps['onResult']>>[0]) =>
               reportTurn({
                 agentId: cfg.voxAgentId ?? '',
                 callId: currentCallId() ?? 'call',
@@ -1654,7 +1722,7 @@ export default defineAgent<ProcessUserData>({
                 language: r.language,
                 transcript: r.callerSaid || r.question,
                 ...(r.answer ? { reply: r.answer } : {}),
-              }),
+              }) } : {}),
           })
         : {};
 
