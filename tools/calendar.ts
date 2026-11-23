@@ -63,8 +63,15 @@ const makePost =
       // for the model (wrong day for the centre, slot taken, invalid date):
       // hand it back so the tool's own branches run. 401, 5xx, a non-JSON
       // body or a JSON without `error` keep throwing exactly as before.
+      // Only an allowlisted refusal keeps its wording (see speakableRefusal);
+      // anything else reaches the model as the neutral sentinel, and the log
+      // carries the status + a code, never the body (it can name a number).
       const reasoned = parseReasoned4xx(res.status, text);
-      if (reasoned) return reasoned as T;
+      if (reasoned) {
+        const kept = speakableRefusal(reasoned);
+        console.log(`[calendar] refused ${res.status} ${refusalLogCode(reasoned)}`);
+        return (kept ?? { error: NEUTRAL_REFUSAL_CODE }) as T;
+      }
       throw new Error(`${path} → HTTP ${res.status} : ${text.slice(0, 200)}`);
     }
     return (await res.json()) as T;
@@ -89,16 +96,65 @@ export const parseReasoned4xx = (
   return body as { error: string } & Record<string, unknown>;
 };
 
-/** Short neutral text for a web refusal a tool has no dedicated branch for:
- *  the web's `message` when it is a string, else the error code (≤ 200 chars). */
+/** What the model hears for any refusal it cannot act on. */
+export const NEUTRAL_REFUSAL = 'Impossible pour le moment.';
+/** Code makePost puts in place of a refusal that is not allowlisted. */
+export const NEUTRAL_REFUSAL_CODE = '__neutral_refusal__';
+
+/** A run of 7+ digits looks like a phone number: never spoken. */
+const DIGIT_RUN = /\d{7,}/;
+
+/** The ONLY refusals whose wording may reach the model: the ones the caller
+ *  can act on. Matched on the web's `error` field (a code, or the French
+ *  text the web routes send for invalid / past dates). Everything else
+ *  (tenant unknown, calendar not connected, missing fields, unknown codes)
+ *  is neutral by default. The web has no 4xx for "appointment not found"
+ *  today (find answers 200 with no events), so nothing is listed for it. */
+export const SPEAKABLE_REFUSALS: readonly { name: string; test: (error: string) => boolean }[] = [
+  { name: 'wrong_day_for_center', test: (e) => e === 'wrong_day_for_center' },
+  { name: 'slot_conflict', test: (e) => e === 'slot_conflict' },
+  // lib/iso-date invalidDateError + lib/booking-request: "date invalide : …"
+  { name: 'invalid_date', test: (e) => /^date invalide : /i.test(e) },
+  // book / reschedule: "Date/heure invalide : …"
+  { name: 'invalid_datetime', test: (e) => /^Date\/heure invalide : /.test(e) },
+  // book / reschedule: "Le créneau … est déjà passé. …"
+  { name: 'past_slot', test: (e) => /^Le créneau .* est déjà passé\./.test(e) },
+];
+
+/** The body itself when its refusal is allowlisted and nothing in it holds a
+ *  7+ digit run, else null (the caller then speaks the neutral text). */
+export const speakableRefusal = <B extends { error: string }>(body: B): B | null => {
+  if (!SPEAKABLE_REFUSALS.some((r) => r.test(body.error))) return null;
+  if (DIGIT_RUN.test(JSON.stringify(body))) return null;
+  return body;
+};
+
+/** Log-safe code for a refusal: the allowlist name, a known internal case,
+ *  a code-shaped `error`, else "unrecognized". Never the message text. */
+export const refusalLogCode = (body: { error: string }): string => {
+  const e = body.error;
+  const listed = SPEAKABLE_REFUSALS.find((r) => r.test(e));
+  if (listed) return listed.name;
+  if (/^Tenant inconnu/i.test(e)) return 'tenant_unknown';
+  if (/Google Calendar non connecté/i.test(e)) return 'calendar_not_connected';
+  if (/Google Sheet non connecté/i.test(e)) return 'sheet_not_connected';
+  if (/^[a-z][a-z0-9_]{0,63}$/.test(e) && !/\d{3,}/.test(e)) return e;
+  return 'unrecognized';
+};
+
+/** Short text for a web refusal a tool has no dedicated branch for: the
+ *  neutral text for a non-allowlisted refusal, else the web's `message`
+ *  when it is a string, else the error code (≤ 200 chars). */
 export const formatRefusal = (data: { error?: unknown; message?: unknown }): string => {
+  if (data.error === NEUTRAL_REFUSAL_CODE) return NEUTRAL_REFUSAL;
   const reason =
     typeof data.message === 'string' && data.message.trim()
       ? data.message
       : typeof data.error === 'string'
         ? data.error
         : 'erreur inconnue';
-  return `Impossible : ${reason.slice(0, 200)}`;
+  const text = `Impossible : ${reason.slice(0, 200)}`;
+  return DIGIT_RUN.test(text) ? NEUTRAL_REFUSAL : text;
 };
 
 // Centers a tenant operates (current = Prestige). Each day of the week is
@@ -129,7 +185,8 @@ export interface ListDatesResponse {
  *  text is exactly the historical one; with it, a plain sentence about the
  *  asked date comes first so the model can't misread the list. */
 export const formatListDates = (data: ListDatesResponse): string => {
-  if (data.error) return `Erreur : ${data.error}`;
+  if (data.error === NEUTRAL_REFUSAL_CODE) return NEUTRAL_REFUSAL;
+  if (data.error) return DIGIT_RUN.test(data.error) ? NEUTRAL_REFUSAL : `Erreur : ${data.error}`;
   const dates = data.dates ?? [];
   const list =
     dates.length === 0

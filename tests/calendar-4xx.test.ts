@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 process.env['APP_URL'] = 'http://web.invalid';
 process.env['INTERNAL_SECRET'] = 'test-secret';
 
-const { makeCalendarTools, parseReasoned4xx, formatRefusal } = await import('../tools/calendar.js');
+const { makeCalendarTools, parseReasoned4xx, formatRefusal, NEUTRAL_REFUSAL, SPEAKABLE_REFUSALS } = await import(
+  '../tools/calendar.js'
+);
 
 // ---- mocked fetch: every call answers with the next (status, body) ----
 
@@ -124,30 +126,127 @@ answer(400, INVALID);
 assert.equal(await run(cal.book_appointment, BOOK_ARGS), `Impossible : ${INVALID.error}`);
 answer(400, INVALID);
 assert.equal(await run(cal.reschedule_appointment, RESCHEDULE_ARGS), `Impossible : ${INVALID.error}`);
+// ---- refusals the caller cannot act on → exactly the neutral text ----
+
+const NEUTRAL = 'Impossible pour le moment.';
+assert.equal(NEUTRAL_REFUSAL, NEUTRAL);
+
 answer(400, { error: 'date requise (YYYY-MM-DD)' });
-assert.equal(
-  await run(cal.check_availability, { date: '', center: 'ashdod', duration: 30 }),
-  'Impossible : date requise (YYYY-MM-DD)',
-);
+assert.equal(await run(cal.check_availability, { date: '', center: 'ashdod', duration: 30 }), NEUTRAL);
 answer(400, { error: 'center invalide. Valeurs : jerusalem, ashdod, natanya' });
-assert.equal(
-  await run(cal.list_available_dates, { center: 'ashdod' }),
-  'Erreur : center invalide. Valeurs : jerusalem, ashdod, natanya',
-);
+assert.equal(await run(cal.list_available_dates, { center: 'ashdod' }), NEUTRAL);
 answer(400, { error: 'Téléphone requis' });
-assert.equal(await run(cal.find_appointment, { phone: '' }), 'Impossible : Téléphone requis');
+assert.equal(await run(cal.find_appointment, { phone: '' }), NEUTRAL);
 answer(400, { error: 'eventId requis' });
-assert.equal(await run(cal.cancel_appointment, { event_id: '' }), 'Impossible : eventId requis');
+assert.equal(await run(cal.cancel_appointment, { event_id: '' }), NEUTRAL);
 answer(400, { error: 'Nom et téléphone requis' });
-assert.equal(await run(cal.save_contact, { name: 'Mock Client' }), 'Impossible : Nom et téléphone requis');
-// a 409 "calendar not connected" reaches the model too, and `message` wins over the code
+assert.equal(await run(cal.save_contact, { name: 'Mock Client' }), NEUTRAL);
+answer(400, { error: 'some_code', message: 'Une raison lisible.' });
+assert.equal(await run(cal.cancel_appointment, { event_id: 'evt_mock1' }), NEUTRAL);
+
+// a 404 for an unknown tenant: neutral to the model, code-only log (no digits of the number)
+for (const [tool, args] of [
+  [cal.book_appointment, BOOK_ARGS],
+  [cal.reschedule_appointment, RESCHEDULE_ARGS],
+  [cal.find_appointment, { phone: '+15550000002' }],
+  [cal.cancel_appointment, { event_id: 'evt_mock1' }],
+  [cal.check_availability, { date: '2026-12-01', center: 'ashdod' }],
+  [cal.list_available_dates, { center: 'ashdod' }],
+] as const) {
+  answer(404, { error: 'Tenant inconnu pour +15550000001' });
+  assert.equal(await run(tool, args), NEUTRAL);
+  assert.ok(logs.some((l) => /^\[calendar\] refused 404 tenant_unknown$/.test(l)), logs.join('\n'));
+  for (const l of logs) assert.ok(!l.includes('5550000001') && !l.includes('Tenant inconnu'), `leak: ${l}`);
+}
+
+// a 409 "Google Calendar not connected" → neutral, logged by code
 answer(409, { error: 'Google Calendar non connecté pour ce compte.' });
+assert.equal(await run(cal.find_appointment, { phone: '+15550000001' }), NEUTRAL);
+assert.ok(logs.includes('[calendar] refused 409 calendar_not_connected'));
+answer(409, { error: 'Google Calendar non connecté pour ce compte.' });
+assert.equal(await run(cal.book_appointment, BOOK_ARGS), NEUTRAL);
+
+// an unknown 400 code can never be spoken (random codes, every tool)
+const ALL_TOOLS = [
+  [cal.book_appointment, BOOK_ARGS],
+  [cal.reschedule_appointment, RESCHEDULE_ARGS],
+  [cal.find_appointment, { phone: '+15550000001' }],
+  [cal.cancel_appointment, { event_id: 'evt_mock1' }],
+  [cal.check_availability, { date: '2026-12-01', center: 'ashdod' }],
+  [cal.list_available_dates, { center: 'ashdod' }],
+  [cal.save_contact, { name: 'Mock Client' }],
+] as const;
+for (let i = 0; i < 20; i++) {
+  const code = `zz_${Math.random().toString(36).slice(2, 10)}`;
+  for (const [tool, args] of ALL_TOOLS) {
+    answer(400, { error: code, message: `secret wording ${code}` });
+    assert.equal(await run(tool, args), NEUTRAL, code);
+  }
+}
+answer(400, { error: 'unknown_internal_code' });
+assert.equal(await run(cal.book_appointment, BOOK_ARGS), NEUTRAL);
+assert.ok(logs.includes('[calendar] refused 400 unknown_internal_code'));
+
+// the allowlist is exactly the actionable refusals
+assert.deepEqual(
+  SPEAKABLE_REFUSALS.map((r) => r.name),
+  ['wrong_day_for_center', 'slot_conflict', 'invalid_date', 'invalid_datetime', 'past_slot'],
+);
+
+// the web's own invalid / past date wordings stay verbatim
+answer(400, { error: 'date invalide : 2026-02-30 (YYYY-MM-DD attendu)' });
 assert.equal(
   await run(cal.find_appointment, { phone: '+15550000001' }),
-  'Impossible : Google Calendar non connecté pour ce compte.',
+  'Impossible : date invalide : 2026-02-30 (YYYY-MM-DD attendu)',
 );
-answer(400, { error: 'some_code', message: 'Une raison lisible.' });
-assert.equal(await run(cal.cancel_appointment, { event_id: 'evt_mock1' }), 'Impossible : Une raison lisible.');
+answer(400, { error: 'Date invalide : 2026-2-3 (format attendu YYYY-MM-DD)' });
+assert.equal(
+  await run(cal.book_appointment, BOOK_ARGS),
+  'Impossible : Date invalide : 2026-2-3 (format attendu YYYY-MM-DD)',
+);
+answer(400, { error: 'date invalide : 2026-02-30 (YYYY-MM-DD attendu)' });
+assert.equal(
+  await run(cal.list_available_dates, { center: 'ashdod' }),
+  'Erreur : date invalide : 2026-02-30 (YYYY-MM-DD attendu)',
+);
+const PAST = 'Le créneau 2026-01-05 10:00 est déjà passé. Propose un horaire futur.';
+answer(400, { error: PAST });
+assert.equal(await run(cal.reschedule_appointment, RESCHEDULE_ARGS), `Impossible : ${PAST}`);
+assert.ok(logs.includes('[calendar] refused 400 past_slot'));
+
+// ---- property: no 7+ digit run ever reaches the model, on any refusal path ----
+
+const DIGITS = /\d{7,}/;
+const NUMBERS = ['+15550000001', '15550000001', '5550000', '0000000'];
+const bodies = (n: string): unknown[] => [
+  { error: `Tenant inconnu pour ${n}` },
+  { error: `Google Calendar non connecté pour ${n}` },
+  { error: `date invalide : ${n} (YYYY-MM-DD attendu)` },
+  { error: `Date/heure invalide : ${n} 10:00` },
+  { error: `Le créneau ${n} 10:00 est déjà passé.` },
+  { error: 'slot_conflict', message: `Le créneau chevauche ; rappeler le ${n}.` },
+  { error: 'slot_conflict', message: 'm', available_slots: [n] },
+  { error: 'wrong_day_for_center', message: `Ouvert le lundi, contact ${n}.`, suggested_dates: [] },
+  { ...WRONG_DAY, suggested_dates: [{ date: n, weekday: 'lundi' }] },
+  { error: 'wrong_day_for_center', message: 'm', expectedLabel: n },
+  { error: n },
+  { error: 'some_code', message: n },
+];
+for (const n of NUMBERS) {
+  for (const body of bodies(n)) {
+    for (const status of [400, 404, 409, 422]) {
+      for (const [tool, args] of ALL_TOOLS) {
+        answer(status, body);
+        const out = await run(tool, args);
+        assert.ok(!DIGITS.test(out), `digits reached the model: ${out} (${status} ${JSON.stringify(body)})`);
+        assert.equal(out, NEUTRAL, `${status} ${JSON.stringify(body)}`);
+        for (const l of logs) assert.ok(!DIGITS.test(l), `digits in log: ${l}`);
+      }
+    }
+  }
+}
+// formatRefusal itself never speaks a digit run either
+assert.equal(formatRefusal({ error: 'x', message: 'appeler le 0501234567' }), NEUTRAL);
 
 // ---- 401 / 500 / non-JSON 400 / JSON 400 without `error` → throws as today ----
 
