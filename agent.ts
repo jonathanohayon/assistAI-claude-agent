@@ -95,7 +95,6 @@ import { makeBusinessTools } from './tools/business.js';
 import { makeCalendarTools } from './tools/calendar.js';
 import { makeClientAgentTools, type ClientAgentToolDeps } from './tools/client-agent.js';
 import { clientAgentOpening, runClientAgentVoiceTurn, selectBrainPlan, urlHost } from './src/brain-mode.js';
-import { makeKnowledgeTools } from './tools/knowledge.js';
 import { makeOrdersTools } from './tools/orders.js';
 
 export default defineAgent<ProcessUserData>({
@@ -854,7 +853,7 @@ export default defineAgent<ProcessUserData>({
           }));
 
           const result = await callAgentWebhook(agentWebhook, {
-            callId: ctx.room.name ?? 'call',
+            roomName: ctx.room.name ?? 'call',
             turnId,
             language: cfg.primaryLanguage ?? 'fr',
             transcript: text,
@@ -1483,7 +1482,7 @@ export default defineAgent<ProcessUserData>({
           // No answer → the model greeting below, as in the legacy mode.
         } else if (webhookMode && agentWebhook) {
           const opening = await callAgentWebhook(agentWebhook, {
-            callId: ctx.room.name ?? 'call',
+            roomName: ctx.room.name ?? 'call',
             turnId: 0,
             language: cfg.primaryLanguage ?? 'fr',
             transcript: '',
@@ -1644,19 +1643,6 @@ export default defineAgent<ProcessUserData>({
       );
     }
 
-    // Tools legacy `knowledge` — gardés en parallèle pour fallback si le
-    // tenant n'a pas encore migré vers business. À droper en release N+1.
-    const knowledgeTools = makeKnowledgeTools(cfg.knowledge);
-    const knowledgeNames = Object.keys(knowledgeTools);
-    if (knowledgeNames.length > 0) {
-      void remoteLog(
-        'agent',
-        'knowledge_tools_registered',
-        `Tools knowledge (legacy) enregistrés : ${knowledgeNames.join(', ')}`,
-        'info',
-        { count: knowledgeNames.length, names: knowledgeNames },
-      );
-    }
 
     // Snapshot du contexte LLM pour audit/debug dans /dashboard/logs.
     // Cet event matérialise ce qui sera EXACTEMENT envoyé à OpenAI :
@@ -1754,7 +1740,6 @@ export default defineAgent<ProcessUserData>({
             : []),
           ...(cfg.ordersEnabled ? ['record_order'] : []),
           ...businessNames,
-          ...knowledgeNames,
           ...Object.keys(clientAgentTools),
           'end_call',
         ],
@@ -1775,7 +1760,6 @@ export default defineAgent<ProcessUserData>({
         ...calendarTools,
         ...ordersTools,
         ...businessTools,
-        ...knowledgeTools,
         end_call: endCallTool,
         ...(isPstnCall ? { transfer_call: transferCallTool } : {}),
         ...clientAgentTools,
