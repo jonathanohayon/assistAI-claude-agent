@@ -28,10 +28,18 @@ import {
   type ClientAgentResult,
   type ClientAgentTurn,
 } from './client-agent.js';
-import { stallLine } from './agent-webhook.js';
+import { stallLine, TURN_BUDGET_MS } from './agent-webhook.js';
 import type { ClientAgentConfig, ClientAgentMode } from './types.js';
 
 export const CLIENT_AGENT_MODES: readonly ClientAgentMode[] = ['lead', 'voice'];
+
+/**
+ * Deadline for one "voice" request (a caller turn or the opening line), retry
+ * included. 2 s, the same as the legacy verbatim webhook (TURN_BUDGET_MS):
+ * in "voice" mode no model fills the wait, the caller only hears the holding
+ * line, so this is tighter than the 2.5 s "lead" tool budget.
+ */
+export const CLIENT_AGENT_VOICE_BUDGET_MS = TURN_BUDGET_MS;
 const MAX_URL_LENGTH = 2048;
 
 export type ClientAgentParse =
@@ -168,7 +176,12 @@ export type VoiceTurnOutcome = 'answered' | NonNullable<ClientAgentResult['failu
  * One caller turn in "voice" mode. Never throws, never leaves silence:
  * - a holding line after CLIENT_AGENT_STALL_MS while the agent thinks;
  * - the answer, verbatim;
- * - no answer (timeout, http, shape, network) or any error → the apology line.
+ * - no answer (timeout, http, shape, network, unsafe_url) or any error → the
+ *   apology line.
+ * The request goes through askClientAgent, so through the shared poster
+ * (src/net/agent-post.ts): address check at connect time, one deadline
+ * (CLIENT_AGENT_VOICE_BUDGET_MS), one retry on a fresh connection for a stale
+ * reused socket.
  * Logs carry the turn id, the outcome and the time only.
  */
 export async function runClientAgentVoiceTurn(p: {
@@ -200,6 +213,7 @@ export async function runClientAgentVoiceTurn(p: {
         callerSaid: p.callerSaid,
         history: p.history,
       }),
+      { budgetMs: CLIENT_AGENT_VOICE_BUDGET_MS },
     );
     clearTimeout(stallTimer);
     log(`[client_agent] voice turn ${p.turnId} → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
@@ -239,6 +253,7 @@ export async function clientAgentOpening(p: {
     const result = await (p.ask ?? askClientAgent)(
       p.endpoint,
       buildClientAgentRequest({ callId: p.callId, turnId: 0, language: p.language, question: '', callerSaid: '', history: [] }),
+      { budgetMs: CLIENT_AGENT_VOICE_BUDGET_MS },
     );
     log(`[client_agent] opening → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
     return result.answer;
@@ -246,4 +261,73 @@ export async function clientAgentOpening(p: {
     log(`[client_agent] opening → error (${(e as Error)?.name ?? 'Error'})`);
     return null;
   }
+}
+
+export type VoiceTurnSubmit = 'sent' | 'queued' | 'replaced' | 'stopped';
+
+/**
+ * "voice" mode: one request in flight at a time, and no caller turn dropped.
+ *
+ * A caller turn that arrives while a request is in flight is kept as the
+ * pending turn and sent as soon as the in-flight one finishes (answer spoken
+ * or failure), with the next turn id. If several arrive meanwhile, the newest
+ * REPLACES the older pending one (no concatenation): the customer's agent
+ * must answer what the caller said last, and the skipped turns are not lost
+ * to it, they are in the transcript, so in `history`, which `run` reads when
+ * the turn is actually sent. Concatenating would invent an utterance the
+ * caller never said and repeat those words in both caller_said and history.
+ *
+ * `stop()` (call end) drops the pending turn. Never throws; `run` failures
+ * are swallowed (runClientAgentVoiceTurn already never throws). Logs carry
+ * turn ids only, never the caller's words.
+ */
+export function createVoiceTurnQueue(
+  run: (callerSaid: string, turnId: number) => Promise<unknown>,
+  log: (line: string) => void = console.log,
+) {
+  let inFlight = false;
+  let pending: string | null = null;
+  let lastTurnId = 0;
+  let stopped = false;
+
+  const send = (callerSaid: string) => {
+    inFlight = true;
+    lastTurnId += 1;
+    const turnId = lastTurnId;
+    void Promise.resolve()
+      .then(() => run(callerSaid, turnId))
+      .catch(() => {})
+      .finally(() => {
+        inFlight = false;
+        if (stopped || pending === null) return;
+        const next = pending;
+        pending = null;
+        log(`[client_agent] pending turn sent after turn ${turnId}`);
+        send(next);
+      });
+  };
+
+  return {
+    submit(callerSaid: string): VoiceTurnSubmit {
+      if (stopped) return 'stopped';
+      if (!inFlight) {
+        send(callerSaid);
+        return 'sent';
+      }
+      const replaced = pending !== null;
+      pending = callerSaid;
+      log(`[client_agent] turn ${replaced ? 'replaces the pending one' : 'queued'} (turn ${lastTurnId} in flight)`);
+      return replaced ? 'replaced' : 'queued';
+    },
+    stop(): void {
+      stopped = true;
+      pending = null;
+    },
+    get inFlight(): boolean {
+      return inFlight;
+    },
+    get lastTurnId(): number {
+      return lastTurnId;
+    },
+  };
 }

@@ -95,7 +95,13 @@ import type {
 import { makeBusinessTools } from './tools/business.js';
 import { makeCalendarTools } from './tools/calendar.js';
 import { makeClientAgentTools, type ClientAgentToolDeps } from './tools/client-agent.js';
-import { clientAgentOpening, runClientAgentVoiceTurn, selectBrainPlan, urlHost } from './src/brain-mode.js';
+import {
+  clientAgentOpening,
+  createVoiceTurnQueue,
+  runClientAgentVoiceTurn,
+  selectBrainPlan,
+  urlHost,
+} from './src/brain-mode.js';
 import { makeOrdersTools } from './tools/orders.js';
 
 export default defineAgent<ProcessUserData>({
@@ -713,6 +719,32 @@ export default defineAgent<ProcessUserData>({
         instructions: `Dis EXACTEMENT ceci, mot pour mot, sans rien ajouter ni reformuler :\n\n${text}`,
       });
     };
+
+    /**
+     * T5c "voice": every caller turn goes to the customer's agent through
+     * this queue (src/brain-mode.ts createVoiceTurnQueue): never two requests
+     * in flight, and a turn said while one is in flight (e.g. "Au revoir.")
+     * is sent right after it instead of being dropped. History is read when
+     * the turn is actually sent, so it includes every turn said meanwhile.
+     */
+    const clientAgentVoiceQueue =
+      clientAgentVoice && agentWebhook
+        ? createVoiceTurnQueue((callerSaid, turnId) =>
+            runClientAgentVoiceTurn({
+              endpoint: agentWebhook,
+              callId: currentCallId() ?? callIdFromRoomName(ctx.room.name ?? 'call'),
+              turnId,
+              language: callerLanguage(),
+              callerSaid,
+              history: transcript.map((entry) => ({
+                role: entry.role === 'assistant' ? ('agent' as const) : ('user' as const),
+                text: entry.text,
+              })),
+              speak: speakVerbatim,
+            }),
+          )
+        : null;
+    session.once(voice.AgentSessionEventTypes.Close, () => clientAgentVoiceQueue?.stop());
     let fromNumber = '';
     let toNumber = origin.kind === 'sip' ? origin.calledNumber : '';
     let recapSent = false;
@@ -802,6 +834,15 @@ export default defineAgent<ProcessUserData>({
       // call quand le modèle y mêle de l'audio de remplissage. On appelle
       // hors du flux vocal, puis on fait prononcer la réponse.
       if (!webhookMode || !agentWebhook) return;
+
+      if (clientAgentVoiceQueue) {
+        // T5c "voice": one request in flight at a time, and a turn that
+        // arrives meanwhile is sent right after, not dropped (the newest
+        // pending turn wins, see createVoiceTurnQueue).
+        clientAgentVoiceQueue.submit(text);
+        return;
+      }
+
       if (webhookTurnInFlight) {
         // L'appelant a enchaîné avant qu'on ait répondu. On ignore le tour
         // précédent plutôt que d'empiler deux réponses qui se parleraient
@@ -812,28 +853,6 @@ export default defineAgent<ProcessUserData>({
       webhookTurnInFlight = true;
       webhookTurnId += 1;
       const turnId = webhookTurnId;
-
-      if (clientAgentVoice) {
-        // T5c "voice": new contract, hashed call id, never throws, never
-        // silent (holding line, then the answer or an apology line).
-        void runClientAgentVoiceTurn({
-          endpoint: agentWebhook,
-          callId: currentCallId() ?? callIdFromRoomName(ctx.room.name ?? 'call'),
-          turnId,
-          language: callerLanguage(),
-          callerSaid: text,
-          history: transcript.map((entry) => ({
-            role: entry.role === 'assistant' ? ('agent' as const) : ('user' as const),
-            text: entry.text,
-          })),
-          speak: speakVerbatim,
-        })
-          .catch(() => 'error')
-          .finally(() => {
-            webhookTurnInFlight = false;
-          });
-        return;
-      }
 
       void (async () => {
         // Filet anti-silence : si le client dépasse ~700 ms, on meuble. Un

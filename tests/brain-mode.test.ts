@@ -3,13 +3,17 @@
 // HTTP call goes to a local fake server on 127.0.0.1.
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 
 import {
+  CLIENT_AGENT_VOICE_BUDGET_MS,
   apologyLine,
   clientAgentField,
   clientAgentOpening,
+  createVoiceTurnQueue,
   parseClientAgent,
   runClientAgentVoiceTurn,
   selectBrainPlan,
@@ -17,9 +21,11 @@ import {
 } from '../src/brain-mode.js';
 import { stallLine } from '../src/agent-webhook.js';
 import { askClientAgent, isVoxToolCall } from '../src/client-agent.js';
+import { createAgentPool } from '../src/net/agent-post.js';
 import { callIdFromRoomName } from '../src/session-context.js';
 import { DEFAULT_VOICE_PROFILE, mapOpenAI } from '../src/voice-profile.js';
 import { makeClientAgentTools } from '../tools/client-agent.js';
+import { depsWith, loopbackRequest, startServer } from './helpers/agent-test-server.js';
 
 const SECRET = 'mock-secret-do-not-log';
 const ROOM = 'call-_+972500000000_mockroom';
@@ -37,7 +43,7 @@ console.warn = capture;
 console.error = capture;
 const say = (s: string) => orig.log(s);
 
-// ── Fake customer agent + fake web, one local server.
+// ── Fake customer agent (HTTPS, through the real poster) + fake web (HTTP).
 type Seen = { path: string; headers: IncomingMessage['headers']; body: string };
 const seen: Seen[] = [];
 let agentReply: (req: Seen, res: ServerResponse) => void = (_r, res) => {
@@ -49,30 +55,43 @@ const server = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
-    const s = { path: req.url ?? '', headers: req.headers, body };
-    if (s.path.startsWith('/api/agent/config')) {
+    const path = req.url ?? '';
+    if (path.startsWith('/api/agent/config')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(webPayload));
       return;
     }
-    if (s.path.startsWith('/api/events')) {
-      res.writeHead(200);
-      res.end('{}');
-      return;
-    }
-    seen.push(s);
-    agentReply(s, res);
+    res.writeHead(200);
+    res.end('{}');
   });
 });
 await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
 const port = (server.address() as AddressInfo).port;
 const BASE = `http://127.0.0.1:${port}`;
-// The worker requires https for clientAgent; the fake server is plain http,
-// so requests are routed to it through an injected fetch.
+
+// The customer's agent: a local TLS server (test-only self-signed cert).
+// Requests reach it through the real poster (src/net/agent-post.ts), with a
+// loopback lookup in place of DNS.
+const tls = {
+  key: readFileSync(new URL('./fixtures/test-only-self-signed.key', import.meta.url)),
+  cert: readFileSync(new URL('./fixtures/test-only-self-signed.crt', import.meta.url)),
+};
+const agentServer = https.createServer(tls, (req, res) => {
+  let body = '';
+  req.on('data', (c) => (body += c));
+  req.on('end', () => {
+    const s = { path: req.url ?? '', headers: req.headers, body };
+    seen.push(s);
+    agentReply(s, res);
+  });
+});
+await new Promise<void>((r) => agentServer.listen(0, '127.0.0.1', r));
+const agentPort = (agentServer.address() as AddressInfo).port;
 const AGENT_URL = 'https://agent.example.test/hook/tok-in-path?k=mock-query-token';
-const toLocal = ((u: string, init: RequestInit) =>
-  fetch(u.replace('https://agent.example.test', BASE), init)) as typeof fetch;
-const ask: typeof askClientAgent = (w, r, o = {}) => askClientAgent(w, r, { ...o, fetchImpl: toLocal });
+const agentPool = createAgentPool();
+const toLocal = (u: string) => u.replace('https://agent.example.test/', `https://agent.example.test:${agentPort}/`);
+const ask: typeof askClientAgent = (w, r, o = {}) =>
+  askClientAgent({ ...w, url: toLocal(w.url) }, r, { ...o, deps: { request: loopbackRequest, agent: agentPool } });
 
 // ── 1. config parse ────────────────────────────────────────────────────
 {
@@ -321,7 +340,18 @@ const ask: typeof askClientAgent = (w, r, o = {}) => askClientAgent(w, r, { ...o
     { r: 'timeout', said: [stallLine('en'), apologyLine('en')] },
     'slow: holding line, then apology',
   );
-  assert.deepEqual(await run({ endpoint: { url: 'https://127.0.0.1:1/hook' }, ask: askClientAgent }), { r: 'network', said: [apologyLine('en')] });
+  // unsafe url (IP literal, or a host resolving to a private address): no
+  // request sent, the apology line is said
+  {
+    const before = seen.length;
+    assert.deepEqual(await run({ endpoint: { url: 'https://127.0.0.1:1/hook' }, ask: askClientAgent }), { r: 'unsafe_url', said: [apologyLine('en')] });
+    const privatePool = createAgentPool();
+    const privateAsk: typeof askClientAgent = (w, r, o = {}) =>
+      askClientAgent(w, r, { ...o, deps: { resolve: async () => [{ address: '10.0.0.5', family: 4 }], agent: privatePool } });
+    assert.deepEqual(await run({ ask: privateAsk }), { r: 'unsafe_url', said: [apologyLine('en')] });
+    assert.equal(seen.length, before, 'no request sent to an unsafe url');
+    privatePool.destroy();
+  }
   assert.deepEqual(await run({ ask: async () => { throw new Error(`boom ${SECRET}`); } }), { r: 'error', said: [apologyLine('en')] });
   // speak itself failing: still resolves (the turn loop never sees a throw)
   let tries = 0;
@@ -336,7 +366,157 @@ const ask: typeof askClientAgent = (w, r, o = {}) => askClientAgent(w, r, { ...o
   assert.equal(apologyLine('xx'), apologyLine('en'));
 }
 
+// ── 4b. "voice" through the poster: one retry on a stale reused socket, 2 s budget
+{
+  assert.equal(CLIENT_AGENT_VOICE_BUDGET_MS, 2000, 'voice turns: the legacy verbatim 2 s budget');
+  const budgets: Array<number | undefined> = [];
+  const spy: typeof askClientAgent = (w, r, o = {}) => {
+    budgets.push(o.budgetMs);
+    return ask(w, r, o);
+  };
+  await runClientAgentVoiceTurn({
+    endpoint: { url: AGENT_URL }, callId: CALL_ID, turnId: 1, language: 'en', callerSaid: 'q', history: [],
+    speak: async () => {}, ask: spy,
+  });
+  await clientAgentOpening({ endpoint: { url: AGENT_URL }, callId: CALL_ID, language: 'en', ask: spy });
+  assert.deepEqual(budgets, [2000, 2000], 'turn and opening both pass the voice budget');
+
+  const stale = await startServer('ok');
+  const used = new Set<number>();
+  stale.override = ({ socketId }, res, sock) => {
+    // Like a proxy that dropped the idle flow: a reused socket dies unanswered.
+    if (used.has(socketId)) { sock.destroy(); return true; }
+    used.add(socketId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ answer: 'Mock answer.' }));
+    return true;
+  };
+  const pool = createAgentPool();
+  const staleAsk: typeof askClientAgent = (w, r, o = {}) =>
+    askClientAgent({ ...w, url: `https://agent.example.com:${stale.port}/hook` }, r, { ...o, deps: depsWith(pool) });
+  const said: string[] = [];
+  const turn = (turnId: number) =>
+    runClientAgentVoiceTurn({
+      endpoint: { url: AGENT_URL }, callId: CALL_ID, turnId, language: 'en', callerSaid: 'q', history: [],
+      speak: async (t) => { said.push(t); }, ask: staleAsk,
+    });
+  assert.equal(await turn(1), 'answered');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await turn(2), 'answered', 'the stale socket is retried, the caller gets the answer');
+  assert.deepEqual(said, ['Mock answer.', 'Mock answer.']);
+  assert.equal(stale.seen.length, 3, 'first, failed reuse, one retry');
+  assert.equal(stale.seen[1]!.socketId, stale.seen[0]!.socketId, 'the failed attempt reused the socket');
+  assert.notEqual(stale.seen[2]!.socketId, stale.seen[1]!.socketId, 'the retry used a fresh connection');
+  assert.ok(logged.filter((l) => l.startsWith('[agent_post] retry on fresh connection')).length >= 1);
+  pool.destroy();
+  await stale.close();
+}
+
+// ── 4c. "voice": a turn said while a request is in flight is sent after, not dropped
+{
+  const timeline: string[] = [];
+  let open = 0;
+  let maxOpen = 0;
+  agentReply = (req, res) => {
+    open += 1;
+    maxOpen = Math.max(maxOpen, open);
+    const body = JSON.parse(req.body) as { turn_id: number; caller_said: string };
+    timeline.push(`request ${body.turn_id}`);
+    setTimeout(() => {
+      open -= 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ answer: `Answer ${body.turn_id}.` }));
+    }, 300);
+  };
+  seen.length = 0;
+  const transcriptMock: Array<{ role: 'user' | 'agent'; text: string }> = [];
+  const doneTurns: number[] = [];
+  const queueLogs: string[] = [];
+  const queue = createVoiceTurnQueue(async (callerSaid, turnId) => {
+    await runClientAgentVoiceTurn({
+      endpoint: { url: AGENT_URL, secret: SECRET }, callId: CALL_ID, turnId, language: 'fr', callerSaid,
+      history: [...transcriptMock], ask, stallMs: 5000,
+      speak: async (t) => {
+        timeline.push(`spoken ${t}`);
+        transcriptMock.push({ role: 'agent', text: t });
+      },
+    });
+    doneTurns.push(turnId);
+  }, (l) => queueLogs.push(l));
+
+  transcriptMock.push({ role: 'user', text: 'Bonjour, une question.' });
+  assert.equal(queue.submit('Bonjour, une question.'), 'sent');
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(queue.inFlight, true, 'turn 1 is in flight');
+  transcriptMock.push({ role: 'user', text: 'Au revoir.' });
+  assert.equal(queue.submit('Au revoir.'), 'queued', 'not dropped while turn 1 is in flight');
+  const until = Date.now() + 3000;
+  while (doneTurns.length < 2 && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(doneTurns, [1, 2]);
+  assert.deepEqual(timeline, ['request 1', 'spoken Answer 1.', 'request 2', 'spoken Answer 2.'], 'turn 2 is sent after turn 1 is spoken');
+  assert.equal(maxOpen, 1, 'never two requests in flight');
+  const second = JSON.parse(seen[1]!.body);
+  assert.equal(second.turn_id, 2);
+  assert.equal(second.caller_said, 'Au revoir.');
+  assert.equal(second.question, 'Au revoir.');
+  assert.deepEqual(second.history.map((h: { text: string }) => h.text), ['Bonjour, une question.', 'Au revoir.', 'Answer 1.'], 'history read when sent: every turn said meanwhile, and the answer spoken');
+  assert.equal(seen[1]!.headers['x-tamara-signature'], createHmac('sha256', SECRET).update(seen[1]!.body).digest('hex'));
+  assert.equal(queue.inFlight, false);
+
+  // several turns while in flight: the newest replaces the older pending one
+  seen.length = 0;
+  doneTurns.length = 0;
+  assert.equal(queue.submit('first'), 'sent');
+  assert.equal(queue.submit('second'), 'queued');
+  assert.equal(queue.submit('third'), 'replaced');
+  const until2 = Date.now() + 3000;
+  while (doneTurns.length < 2 && Date.now() < until2) await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, 400));
+  assert.deepEqual(doneTurns, [3, 4], 'turn ids keep counting');
+  assert.deepEqual(seen.map((x) => JSON.parse(x.body).caller_said), ['first', 'third'], 'the newest pending turn is sent');
+  assert.equal(maxOpen, 1);
+
+  // call end: the pending turn is dropped, nothing sent after
+  seen.length = 0;
+  doneTurns.length = 0;
+  assert.equal(queue.submit('one'), 'sent');
+  assert.equal(queue.submit('two'), 'queued');
+  queue.stop();
+  assert.equal(queue.submit('three'), 'stopped');
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(seen.length, 1, 'nothing sent after stop');
+
+  // a run that throws never blocks the queue
+  const q2: number[] = [];
+  const throwing = createVoiceTurnQueue(async (_t, id) => {
+    q2.push(id);
+    if (id === 1) throw new Error('boom');
+  }, () => {});
+  throwing.submit('a');
+  throwing.submit('b');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(q2, [1, 2]);
+  assert.ok(queueLogs.every((l) => !/Bonjour|revoir|first|second|third/.test(l)), 'queue logs carry no caller words');
+}
+
+// ── 4d. "lead": the default tool path is the poster-based askClientAgent
+{
+  const before = seen.length;
+  const tool = makeClientAgentTools({
+    webhook: { url: 'https://10.0.0.5/hook' },
+    getCallId: () => CALL_ID,
+    getLanguage: () => 'en',
+    getCallerSaid: () => '',
+    getHistory: () => [],
+  }).ask_client_agent as unknown as { execute: (a: unknown, o: unknown) => Promise<string> };
+  assert.match(await tool.execute({ question: 'q' }, {}), /did not answer/);
+  assert.equal(seen.length, before, 'no request sent');
+  assert.ok(logged.some((l) => l.includes('unsafe_url')), "refused by askClientAgent's url check (unsafe_url)");
+}
+
 server.close();
+agentPool.destroy();
+await new Promise<void>((r) => agentServer.close(() => r()));
 
 // ── 5. logs: no secret, no full url, no room name, no caller words ────────
 for (const line of logged) {
