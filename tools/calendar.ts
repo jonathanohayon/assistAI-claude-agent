@@ -59,10 +59,47 @@ const makePost =
     console.log(`[calendar-latency] ${path} → ${res.status} ${ms}ms`);
     if (!res.ok) {
       const text = await res.text();
+      // A 4xx that carries a reason (`{ error: string, ... }`) is an answer
+      // for the model (wrong day for the centre, slot taken, invalid date):
+      // hand it back so the tool's own branches run. 401, 5xx, a non-JSON
+      // body or a JSON without `error` keep throwing exactly as before.
+      const reasoned = parseReasoned4xx(res.status, text);
+      if (reasoned) return reasoned as T;
       throw new Error(`${path} → HTTP ${res.status} : ${text.slice(0, 200)}`);
     }
     return (await res.json()) as T;
   };
+
+/** Parsed body of a 4xx (except 401) whose JSON has a string `error` field,
+ *  else null. Never throws. */
+export const parseReasoned4xx = (
+  status: number,
+  text: string,
+): ({ error: string } & Record<string, unknown>) | null => {
+  if (status < 400 || status >= 500 || status === 401) return null;
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const error = (body as Record<string, unknown>)['error'];
+  if (typeof error !== 'string') return null;
+  return body as { error: string } & Record<string, unknown>;
+};
+
+/** Short neutral text for a web refusal a tool has no dedicated branch for:
+ *  the web's `message` when it is a string, else the error code (≤ 200 chars). */
+export const formatRefusal = (data: { error?: unknown; message?: unknown }): string => {
+  const reason =
+    typeof data.message === 'string' && data.message.trim()
+      ? data.message
+      : typeof data.error === 'string'
+        ? data.error
+        : 'erreur inconnue';
+  return `Impossible : ${reason.slice(0, 200)}`;
+};
 
 // Centers a tenant operates (current = Prestige). Each day of the week is
 // bound to ONE centre on the server side — this enum is exposed to the LLM
@@ -164,6 +201,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       if (data.error === 'wrong_day_for_center') {
         return `${data.message} Propose une de ces dates à la cliente.`;
       }
+      // Any other refusal (invalid date, calendar not connected, ...).
+      if (data.error) return formatRefusal(data);
       // No slots left on this date → server gave us the next valid dates
       // for the SAME center.
       if (data.reason && data.suggested_dates) {
@@ -249,7 +288,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         if (data.expectedLabel) {
           return `${data.error} (Le bon centre pour le ${date} est ${data.expectedLabel}.)`;
         }
-        return `Erreur réservation : ${data.error ?? 'inconnue'}`;
+        return formatRefusal(data);
       }
 
       // Auto-save contact au CRM (Sheet) UNIQUEMENT si la feature crm est
@@ -261,7 +300,14 @@ export const makeCalendarTools = (ctx: ToolContext) => {
           phone: resolvedPhone,
           email: email ?? undefined,
           notes,
-        }).catch((e) => console.error('save_contact (auto) failed:', e));
+        })
+          .then((r) => {
+            // Personal data stays out of the log: no body, no message.
+            if (r && typeof r === 'object' && 'error' in r) {
+              console.error('save_contact (auto) refused by the web');
+            }
+          })
+          .catch((e) => console.error('save_contact (auto) failed:', e));
       }
 
       return data.summary ?? `RDV confirmé le ${date} à ${time} pour ${name}.`;
@@ -295,7 +341,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         '/api/sheets/contact',
         { name, phone: resolvedPhone, email: email ?? undefined, notes: notes ?? undefined },
       );
-      return data.message ?? data.error ?? 'Contact enregistré.';
+      if (data.error) return formatRefusal(data);
+      return data.message ?? 'Contact enregistré.';
     },
   });
 
@@ -312,7 +359,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         events?: { eventId: string; summary: string; start: string; end: string }[];
         error?: string;
       }>('/api/calendar/find', { phone, date: date ?? undefined });
-      if (data.error) return `Erreur recherche : ${data.error}`;
+      if (data.error) return formatRefusal(data);
       const events = data.events ?? [];
       if (events.length === 0) return `Aucun rendez-vous trouvé pour ${phone}.`;
       return events
@@ -336,7 +383,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         '/api/calendar/cancel',
         { eventId: event_id },
       );
-      return data.message ?? data.error ?? 'RDV annulé.';
+      if (data.error) return formatRefusal(data);
+      return data.message ?? 'RDV annulé.';
     },
   });
 
@@ -380,7 +428,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
           'Ce créneau chevauche un rendez-vous existant. Propose une autre heure.'
         );
       }
-      return data.summary ?? data.error ?? 'RDV déplacé.';
+      if (data.error) return formatRefusal(data);
+      return data.summary ?? 'RDV déplacé.';
     },
   });
 
