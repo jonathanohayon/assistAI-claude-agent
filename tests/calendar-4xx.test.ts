@@ -190,8 +190,34 @@ assert.ok(logs.includes('[calendar] refused 400 unknown_internal_code'));
 // the allowlist is exactly the actionable refusals
 assert.deepEqual(
   SPEAKABLE_REFUSALS.map((r) => r.name),
-  ['wrong_day_for_center', 'slot_conflict', 'invalid_date', 'invalid_datetime', 'past_slot'],
+  ['wrong_day_for_center', 'slot_conflict', 'invalid_date', 'invalid_datetime', 'past_slot', 'invalid_time', 'invalid_duration'],
 );
+
+// the web's invalid time / duration wordings (lib/booking-request) reach the model verbatim: it can retry
+const BAD_TIME = 'Heure invalide : 25:00 (format attendu HH:MM, 00:00–23:59)';
+const BAD_DURATION = 'Durée invalide : 1000 (minutes, entier entre 5 et 480)';
+for (const [tool, args] of [
+  [cal.book_appointment, BOOK_ARGS],
+  [cal.reschedule_appointment, RESCHEDULE_ARGS],
+] as const) {
+  answer(400, { error: BAD_TIME });
+  assert.equal(await run(tool, args), `Impossible : ${BAD_TIME}`);
+  assert.ok(logs.includes('[calendar] refused 400 invalid_time'), logs.join('\n'));
+  answer(400, { error: BAD_DURATION });
+  assert.equal(await run(tool, args), `Impossible : ${BAD_DURATION}`);
+  assert.ok(logs.includes('[calendar] refused 400 invalid_duration'), logs.join('\n'));
+  // allowlisted but carrying a 7+ digit run → still neutral
+  answer(400, { error: 'Heure invalide : 15550000001 (format attendu HH:MM, 00:00–23:59)' });
+  assert.equal(await run(tool, args), NEUTRAL);
+  answer(400, { error: 'Durée invalide : 15550000001 (minutes, entier entre 5 et 480)' });
+  assert.equal(await run(tool, args), NEUTRAL);
+  // the other book-side refusal stays neutral
+  answer(400, { error: 'Champs requis manquants (name, phone, date, time)' });
+  assert.equal(await run(tool, args), NEUTRAL);
+  // anchored: the wording must start the message
+  answer(400, { error: 'Erreur : Heure invalide : 25:00' });
+  assert.equal(await run(tool, args), NEUTRAL);
+}
 
 // the web's own invalid / past date wordings stay verbatim
 answer(400, { error: 'date invalide : 2026-02-30 (YYYY-MM-DD attendu)' });
@@ -224,6 +250,8 @@ const bodies = (n: string): unknown[] => [
   { error: `date invalide : ${n} (YYYY-MM-DD attendu)` },
   { error: `Date/heure invalide : ${n} 10:00` },
   { error: `Le créneau ${n} 10:00 est déjà passé.` },
+  { error: `Heure invalide : ${n} (format attendu HH:MM, 00:00–23:59)` },
+  { error: `Durée invalide : ${n} (minutes, entier entre 5 et 480)` },
   { error: 'slot_conflict', message: `Le créneau chevauche ; rappeler le ${n}.` },
   { error: 'slot_conflict', message: 'm', available_slots: [n] },
   { error: 'wrong_day_for_center', message: `Ouvert le lundi, contact ${n}.`, suggested_dates: [] },
