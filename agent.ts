@@ -65,6 +65,8 @@ import {
 import { describeOpenAiKey, resolveOpenAiKey } from './src/openai-key.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { sniffLang } from './src/lang-sniff.js';
+import { callerLanguageOf, createCallerTurnTracker } from './src/caller-turn.js';
+import { createStallGate } from './src/stall-gate.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { startHeartbeat } from './src/heartbeat.js';
 import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
@@ -679,11 +681,18 @@ export default defineAgent<ProcessUserData>({
 
     // ── Transcript capture ──────────────────────────────────────────────
     const transcript: TranscriptEntry[] = [];
-    /** T5c: the caller's language for the customer's agent (Hebrew sniffed, else the tenant's). */
-    const callerLanguage = (): string => {
-      const lastUser = [...transcript].reverse().find((t) => t.role === 'user');
-      return lastUser && sniffLang(lastUser.text) === 'he' ? 'he' : (cfg.primaryLanguage ?? 'fr');
-    };
+    /**
+     * T5c: the caller's language for the customer's agent (Hebrew sniffed,
+     * else the tenant's). The one source for "lead" and "voice".
+     */
+    const callerLanguage = (): string =>
+      callerLanguageOf([...transcript].reverse().find((t) => t.role === 'user')?.text, cfg.primaryLanguage);
+    /** T5c "lead": the caller's last final transcript, awaited when still in flight. */
+    const callerTurns = createCallerTurnTracker();
+    /** T5c: the session is closed or closing; a finishing turn says nothing. */
+    let voiceSessionClosed = false;
+    const isSessionClosed = (): boolean =>
+      voiceSessionClosed || (session as unknown as { _closing?: boolean })._closing === true;
     // État du mode BYO-agent : un tour à la fois, numérotés pour les logs.
     let webhookTurnInFlight = false;
     let webhookTurnId = 0;
@@ -732,9 +741,10 @@ export default defineAgent<ProcessUserData>({
      * is sent right after it instead of being dropped. History is read when
      * the turn is actually sent, so it includes every turn said meanwhile.
      */
+    const voiceStallGate = createStallGate();
     const clientAgentVoiceQueue =
       clientAgentVoice && agentWebhook
-        ? createVoiceTurnQueue((callerSaid, turnId) =>
+        ? createVoiceTurnQueue((callerSaid, turnId, turn) =>
             runClientAgentVoiceTurn({
               endpoint: agentWebhook,
               callId: currentCallId() ?? callIdFromRoomName(ctx.room.name ?? 'call'),
@@ -746,10 +756,20 @@ export default defineAgent<ProcessUserData>({
                 text: entry.text,
               })),
               speak: speakVerbatim,
+              stallGate: voiceStallGate,
+              isStale: turn.isStale,
+              isClosed: isSessionClosed,
             }),
           )
         : null;
-    session.once(voice.AgentSessionEventTypes.Close, () => clientAgentVoiceQueue?.stop());
+    session.once(voice.AgentSessionEventTypes.Close, () => {
+      voiceSessionClosed = true;
+      clientAgentVoiceQueue?.stop();
+    });
+    // The caller stopped speaking: its final transcript is on its way.
+    session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
+      if ((ev as { oldState?: string }).oldState === 'speaking') callerTurns.speechEnded();
+    });
     let fromNumber = '';
     let toNumber = origin.kind === 'sip' ? origin.calledNumber : '';
     let recapSent = false;
@@ -820,6 +840,8 @@ export default defineAgent<ProcessUserData>({
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
       if (!ev.isFinal) return;
       const text = (ev.transcript ?? '').trim();
+      // Before the empty check: an empty final transcript ends the turn too.
+      callerTurns.finalTranscript(text);
       if (!text) return;
       const entry: TranscriptEntry = { role: 'user', text };
       transcript.push(entry);
@@ -1688,11 +1710,11 @@ export default defineAgent<ProcessUserData>({
         ? makeClientAgentTools({
             webhook: toolEndpoint,
             getCallId: () => currentCallId() ?? 'call',
-            getLanguage: () => {
-              const lastUser = [...transcript].reverse().find((t) => t.role === 'user');
-              return lastUser && sniffLang(lastUser.text) === 'he' ? 'he' : (cfg.primaryLanguage ?? 'en');
-            },
-            getCallerSaid: () => [...transcript].reverse().find((t) => t.role === 'user')?.text ?? '',
+            // The same language as "voice", never an "en" default: today
+            // fetchConfig does not copy the web's primaryLanguage into cfg,
+            // so that default was what every "lead" call sent.
+            getLanguage: callerLanguage,
+            getCallerSaid: () => callerTurns.callerSaid(),
             getHistory: () =>
               transcript.map((t) => ({ role: t.role === 'assistant' ? ('agent' as const) : ('user' as const), text: t.text })),
             startStall: () => {
@@ -1705,22 +1727,21 @@ export default defineAgent<ProcessUserData>({
                 return null;
               }
               let cancelled = false;
-              let handle: { interrupt: () => void } | null = null;
-              const line = stallLine(cfg.primaryLanguage ?? 'en');
+              const language = callerLanguage();
+              const line = stallLine(language);
               void tts
-                .speak(line, { voice: cfg.voice, language: cfg.primaryLanguage ?? 'en', ...(cfg.speed ? { speed: cfg.speed } : {}) })
+                .speak(line, { voice: cfg.voice, language, ...(cfg.speed ? { speed: cfg.speed } : {}) })
                 .then((audio) => {
-                  if (cancelled) return;
-                  handle = session.say(line, { audio, addToChatCtx: false });
+                  if (cancelled || isSessionClosed()) return;
+                  session.say(line, { audio, addToChatCtx: false });
                 })
                 .catch((e) => console.warn(`[client_agent] holding line failed: ${(e as Error).message}`));
+              // The answer arrived: a line not started yet is never said; one
+              // already playing finishes, and the model's answer, scheduled
+              // after it on the same speech queue, follows it (no overlap,
+              // no cut-off line).
               return () => {
                 cancelled = true;
-                try {
-                  handle?.interrupt();
-                } catch {
-                  /* already played */
-                }
               };
             },
             ...(voxToolMode ? { onResult: (r: Parameters<NonNullable<ClientAgentToolDeps['onResult']>>[0]) =>

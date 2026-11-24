@@ -212,7 +212,7 @@ assert.ok(text.includes('Prête, retrait dès 14 h, 12,50 €.'), 'answer passed
 assert.match(text, /EXACTLY.*prices, dates, times, numbers, names, quantities and any yes\/no/);
 assert.match(toolResultText({ answer: null, elapsedMs: 1, failure: 'timeout' }), /take a message/);
 
-// ── 5. the tool: stall after 700 ms only when slow, cancelled on answer, one report per call
+// ── 5. the tool: stall after 1.5 s only when slow, cancelled on answer, one report per call
 {
   const events: string[] = [];
   const reports: unknown[] = [];
@@ -239,7 +239,7 @@ assert.match(toolResultText({ answer: null, elapsedMs: 1, failure: 'timeout' }),
   const fast = await (mk(10) as unknown as { execute: (a: unknown, o: unknown) => Promise<string> }).execute({ question: 'q' }, {});
   assert.match(fast, /«Oui\.»/);
   assert.deepEqual(events, [], 'no holding line for a fast answer');
-  await (mk(800) as unknown as { execute: (a: unknown, o: unknown) => Promise<string> }).execute({ question: 'q' }, {});
+  await (mk(1600) as unknown as { execute: (a: unknown, o: unknown) => Promise<string> }).execute({ question: 'q' }, {});
   console.log = log;
   assert.deepEqual(events, ['stall', 'cancel']);
   assert.equal(reports.length, 2, 'one /api/v1/turns report per tool call');

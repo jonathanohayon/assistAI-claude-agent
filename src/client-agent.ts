@@ -19,11 +19,16 @@ import { createHmac } from 'node:crypto';
 import { postToAgent, type AgentPostDeps } from './net/agent-post.js';
 import { checkUrlShape, type UnsafeReason } from './net/safe-url.js';
 import { remoteLog } from './remote-log.js';
+import { STALL_AFTER_MS } from './stall-gate.js';
 
 /** Whole budget for one tool call (network + client LLM). */
 export const CLIENT_AGENT_BUDGET_MS = 2500;
-/** After this, the holding line plays while we keep waiting. */
-export const CLIENT_AGENT_STALL_MS = 700;
+/**
+ * After this, the holding line plays while we keep waiting (at most once
+ * every other turn, see src/stall-gate.ts). 1.5 s: below it, the answer
+ * itself comes fast enough that a holding line only delays it.
+ */
+export const CLIENT_AGENT_STALL_MS = STALL_AFTER_MS;
 /** History sent with each question: the last N turns. */
 export const CLIENT_AGENT_HISTORY_TURNS = 6;
 

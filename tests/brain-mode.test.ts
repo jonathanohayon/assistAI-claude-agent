@@ -412,7 +412,8 @@ const ask: typeof askClientAgent = (w, r, o = {}) =>
   await stale.close();
 }
 
-// ── 4c. "voice": a turn said while a request is in flight is sent after, not dropped
+// ── 4c. "voice": a turn said while a request is in flight is sent after, not
+// dropped; the in-flight turn's reply, now stale, is not spoken
 {
   const timeline: string[] = [];
   let open = 0;
@@ -432,10 +433,10 @@ const ask: typeof askClientAgent = (w, r, o = {}) =>
   const transcriptMock: Array<{ role: 'user' | 'agent'; text: string }> = [];
   const doneTurns: number[] = [];
   const queueLogs: string[] = [];
-  const queue = createVoiceTurnQueue(async (callerSaid, turnId) => {
+  const queue = createVoiceTurnQueue(async (callerSaid, turnId, turn) => {
     await runClientAgentVoiceTurn({
       endpoint: { url: AGENT_URL, secret: SECRET }, callId: CALL_ID, turnId, language: 'fr', callerSaid,
-      history: [...transcriptMock], ask, stallMs: 5000,
+      history: [...transcriptMock], ask, stallMs: 5000, isStale: turn.isStale,
       speak: async (t) => {
         timeline.push(`spoken ${t}`);
         transcriptMock.push({ role: 'agent', text: t });
@@ -453,13 +454,14 @@ const ask: typeof askClientAgent = (w, r, o = {}) =>
   const until = Date.now() + 3000;
   while (doneTurns.length < 2 && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(doneTurns, [1, 2]);
-  assert.deepEqual(timeline, ['request 1', 'spoken Answer 1.', 'request 2', 'spoken Answer 2.'], 'turn 2 is sent after turn 1 is spoken');
+  assert.deepEqual(timeline, ['request 1', 'request 2', 'spoken Answer 2.'], 'turn 2 is sent after turn 1; the stale Answer 1 is never spoken');
+  assert.ok(logged.includes('[voice] turn 1 reply dropped (stale)'));
   assert.equal(maxOpen, 1, 'never two requests in flight');
   const second = JSON.parse(seen[1]!.body);
   assert.equal(second.turn_id, 2);
   assert.equal(second.caller_said, 'Au revoir.');
   assert.equal(second.question, 'Au revoir.');
-  assert.deepEqual(second.history.map((h: { text: string }) => h.text), ['Bonjour, une question.', 'Au revoir.', 'Answer 1.'], 'history read when sent: every turn said meanwhile, and the answer spoken');
+  assert.deepEqual(second.history.map((h: { text: string }) => h.text), ['Bonjour, une question.', 'Au revoir.'], 'history read when sent: the earlier caller words are not lost');
   assert.equal(seen[1]!.headers['x-tamara-signature'], createHmac('sha256', SECRET).update(seen[1]!.body).digest('hex'));
   assert.equal(queue.inFlight, false);
 

@@ -29,6 +29,7 @@ import {
   type ClientAgentTurn,
 } from './client-agent.js';
 import { stallLine, TURN_BUDGET_MS } from './agent-webhook.js';
+import { createStallGate, type StallGate } from './stall-gate.js';
 import type { ClientAgentConfig, ClientAgentMode } from './types.js';
 
 export const CLIENT_AGENT_MODES: readonly ClientAgentMode[] = ['lead', 'voice'];
@@ -170,14 +171,27 @@ export function apologyLine(language: string): string {
   return APOLOGY[language] ?? APOLOGY['en']!;
 }
 
-export type VoiceTurnOutcome = 'answered' | NonNullable<ClientAgentResult['failure']> | 'error';
+export type VoiceTurnOutcome =
+  | 'answered'
+  | NonNullable<ClientAgentResult['failure']>
+  | 'error'
+  /** A newer caller turn exists: this reply was not spoken. */
+  | 'stale'
+  /** The session closed (or is closing): nothing was spoken. */
+  | 'discarded';
 
 /**
  * One caller turn in "voice" mode. Never throws, never leaves silence:
- * - a holding line after CLIENT_AGENT_STALL_MS while the agent thinks;
+ * - a holding line only after CLIENT_AGENT_STALL_MS (1.5 s) of waiting, and
+ *   never on two consecutive turns (`stallGate`, one per call); an answer
+ *   that arrives while it is being said is spoken after it, never over it;
  * - the answer, verbatim;
  * - no answer (timeout, http, shape, network, unsafe_url) or any error → the
- *   apology line.
+ *   apology line;
+ * - a newer caller turn already exists when the reply arrives (`isStale`) →
+ *   nothing spoken: the newer turn's request carries the full history, so
+ *   it answers what the caller said last;
+ * - the session closed / closing (`isClosed`) → nothing spoken, one info line.
  * The request goes through askClientAgent, so through the shared poster
  * (src/net/agent-post.ts): address check at connect time, one deadline
  * (CLIENT_AGENT_VOICE_BUDGET_MS), one retry on a fresh connection for a stale
@@ -195,15 +209,49 @@ export async function runClientAgentVoiceTurn(p: {
   speak: (text: string) => Promise<void>;
   ask?: typeof askClientAgent;
   stallMs?: number;
+  /** One per call: remembers whether the previous turn said the holding line. */
+  stallGate?: StallGate;
+  /** True when a newer caller turn exists (queued or in flight). */
+  isStale?: () => boolean;
+  /** True when the session is closed or closing. */
+  isClosed?: () => boolean;
   log?: (line: string) => void;
 }): Promise<VoiceTurnOutcome> {
   const log = p.log ?? console.log;
+  const gate = p.stallGate ?? createStallGate();
+  const closed = () => {
+    try {
+      return p.isClosed?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  const stale = () => {
+    try {
+      return p.isStale?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  const discarded = (): VoiceTurnOutcome => {
+    log(`[voice] turn ${p.turnId} discarded (session closed)`);
+    return 'discarded';
+  };
+
+  let stalled = false;
+  let holding = null as Promise<void> | null;
   const stallTimer = setTimeout(() => {
-    // Never awaited: the holding line must not delay the answer.
-    void p.speak(stallLine(p.language)).catch(() => {});
+    if (!gate.mayStall() || closed()) return;
+    stalled = true;
+    // Not awaited here: the request keeps running. The answer waits for it
+    // (below), so the two never overlap.
+    holding = p.speak(stallLine(p.language)).catch(() => {});
   }, p.stallMs ?? CLIENT_AGENT_STALL_MS);
+
+  let result: ClientAgentResult | null = null;
+  let errorName: string | null = null;
   try {
-    const result = await (p.ask ?? askClientAgent)(
+    result = await (p.ask ?? askClientAgent)(
       p.endpoint,
       buildClientAgentRequest({
         callId: p.callId,
@@ -215,22 +263,40 @@ export async function runClientAgentVoiceTurn(p: {
       }),
       { budgetMs: CLIENT_AGENT_VOICE_BUDGET_MS },
     );
-    clearTimeout(stallTimer);
-    log(`[client_agent] voice turn ${p.turnId} → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
-    if (result.answer) {
-      await p.speak(result.answer);
-      return 'answered';
-    }
-    await p.speak(apologyLine(p.language));
-    return result.failure ?? 'shape';
   } catch (e) {
-    clearTimeout(stallTimer);
     // The error name only: a message could echo the url or the caller's words.
-    log(`[client_agent] voice turn ${p.turnId} → error (${(e as Error)?.name ?? 'Error'})`);
-    try {
-      await p.speak(apologyLine(p.language));
-    } catch {
-      /* nothing left to say with */
+    errorName = (e as Error)?.name ?? 'Error';
+  }
+  clearTimeout(stallTimer);
+  gate.endTurn(stalled);
+
+  if (closed()) return discarded();
+  log(
+    result
+      ? `[client_agent] voice turn ${p.turnId} → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`
+      : `[client_agent] voice turn ${p.turnId} → error (${errorName})`,
+  );
+  // The holding line, if it started, finishes before anything else is said.
+  if (holding) await holding;
+  if (closed()) return discarded();
+  if (stale()) {
+    log(`[voice] turn ${p.turnId} reply dropped (stale)`);
+    return 'stale';
+  }
+
+  const answer = result?.answer ?? null;
+  try {
+    await p.speak(answer ?? apologyLine(p.language));
+    return answer ? 'answered' : result ? (result.failure ?? 'shape') : 'error';
+  } catch (e) {
+    if (closed()) return discarded();
+    log(`[client_agent] voice turn ${p.turnId} speak failed (${(e as Error)?.name ?? 'Error'})`);
+    if (answer) {
+      try {
+        await p.speak(apologyLine(p.language));
+      } catch {
+        /* nothing left to say with */
+      }
     }
     return 'error';
   }
@@ -277,12 +343,17 @@ export type VoiceTurnSubmit = 'sent' | 'queued' | 'replaced' | 'stopped';
  * the turn is actually sent. Concatenating would invent an utterance the
  * caller never said and repeat those words in both caller_said and history.
  *
+ * When the in-flight turn's reply arrives and a newer turn is already
+ * pending, that reply is stale: `run` gets `isStale()` and does not speak it
+ * (runClientAgentVoiceTurn), so the caller never hears an answer to what
+ * they said before their last words.
+ *
  * `stop()` (call end) drops the pending turn. Never throws; `run` failures
  * are swallowed (runClientAgentVoiceTurn already never throws). Logs carry
  * turn ids only, never the caller's words.
  */
 export function createVoiceTurnQueue(
-  run: (callerSaid: string, turnId: number) => Promise<unknown>,
+  run: (callerSaid: string, turnId: number, turn: { isStale: () => boolean }) => Promise<unknown>,
   log: (line: string) => void = console.log,
 ) {
   let inFlight = false;
@@ -295,7 +366,7 @@ export function createVoiceTurnQueue(
     lastTurnId += 1;
     const turnId = lastTurnId;
     void Promise.resolve()
-      .then(() => run(callerSaid, turnId))
+      .then(() => run(callerSaid, turnId, { isStale: () => pending !== null || lastTurnId > turnId }))
       .catch(() => {})
       .finally(() => {
         inFlight = false;
