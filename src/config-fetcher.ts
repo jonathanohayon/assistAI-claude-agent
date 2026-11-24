@@ -31,8 +31,11 @@ import {
 import { FALLBACK_GREETING, FALLBACK_INSTRUCTIONS } from './fallback-persona.js';
 import { remoteLog } from './remote-log.js';
 import { fetchVoxConfigByPhone, voxInstructions } from './vox-config.js';
+import { voxToolModeEnabled } from './client-agent.js';
+import { voxBrainInstructions } from './vox-brain.js';
 import { webGet } from './web-api.js';
 import { parseClientProfile } from './client-profile.js';
+import { clientAgentField } from './brain-mode.js';
 
 /**
  * Permissif par défaut — si le fetch échoue ou si l'admin n'a pas encore
@@ -128,9 +131,9 @@ export async function fetchConfig(
         `[config] agent Tamara « ${vox.name} » (${vox.id}) pour ${origin.calledNumber}`,
       );
       return {
-        // Le modèle ne porte plus de persona : il prononce ce que le webhook
-        // renvoie, avec la diction demandée.
-        instructions: voxInstructions(vox),
+        // Tool mode (default): Tamara is the brain, the client's agent is the
+        // ask_client_agent tool. VOX_VERBATIM=1: legacy diction-only prompt.
+        instructions: voxToolModeEnabled() ? voxBrainInstructions(vox) : voxInstructions(vox),
         greetingInstructions: '',
         agentName: vox.name,
         model: REALTIME_CONFIG.model,
@@ -235,6 +238,10 @@ export async function fetchConfig(
       data.agentWebhook.url.startsWith('http')
         ? { agentWebhook: data.agentWebhook }
         : {}),
+      // T5c: the customer's agent, strictly parsed; invalid → absent (one
+      // log line with the reason, never the url or the secret). Absent from
+      // the payload → no key at all (today's config, unchanged).
+      ...clientAgentField((data as Record<string, unknown>)['clientAgent']),
       // exactOptionalPropertyTypes refuse 'undefined' explicite ; on
       // omet la clé si vide pour ne pas planter le typing.
       ...(data.perCallContextTemplate !== undefined

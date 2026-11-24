@@ -1,6 +1,7 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+import { logToolCall } from '../src/tool-log.js';
 import { webPost } from '../src/web-api.js';
 
 /**
@@ -42,6 +43,7 @@ export const makeOrdersTools = (ctx: OrdersToolContext) => {
         .describe('Centre / point de retrait si pertinent (optionnel).'),
     }),
     execute: async ({ item, quantity, description, name, center }) => {
+      logToolCall('record_order', { item, quantity, description, name, center });
       const dialedPhone = ctx.getDialedPhone?.() || ctx.dialedPhone;
       const headers: Record<string, string> = {};
       if (dialedPhone) {

@@ -76,6 +76,13 @@ export interface FetchedConfig {
   /** Identifiant de l'agent Tamara, pour rattacher les tours au monitoring. */
   voxAgentId?: string;
   /**
+   * T5 "Ask your agent": the customer's own agent, served by the web only
+   * when the CLIENT_AGENT capability is active (already SSRF-checked there).
+   * Parsed strictly by src/brain-mode.ts; invalid → absent. When present it
+   * wins over `agentWebhook` (src/brain-mode.ts selectBrainPlan).
+   */
+  clientAgent?: ClientAgentConfig;
+  /**
    * Prise de commandes au téléphone activée (toggle "Commandes" de la tuile
    * CRM). Quand vrai, le worker enregistre le tool `record_order`. Défaut
    * false (opt-in). Absent du payload web ancien → traité comme false.
@@ -96,26 +103,12 @@ export interface FetchedConfig {
    */
   perCallContextTemplate?: string;
   /**
-   * Base de connaissances tenant — array de business. Legacy 2026-05-28 :
-   * remplacé par `business` (structure complète). Conservé pour fallback
-   * worker pendant 1 release.
-   */
-  knowledge?: KnowledgeEntry[];
-  /**
    * Données business structurées du tenant : identité + centres (avec
    * horaires hebdo) + soins/tarifs. Exposé via 5 tools fixes côté worker
    * (list_centres, get_centre_info, get_opening_hours, list_services,
    * find_service) — voir `tools/business.ts`.
    */
   business?: BusinessConfig;
-}
-
-export interface KnowledgeEntry {
-  id: string;
-  toolName: string;
-  businessName: string;
-  openingHours: string;
-  description: string;
 }
 
 export type BusinessWeekDay =
@@ -188,3 +181,18 @@ export type SessionOrigin =
   // l'agent). Aucun recap (c'est un test).
   | { kind: 'outbound_test'; agentId: string; userId: string }
   | { kind: 'unknown' };
+
+/** T5: who speaks for the customer's agent. */
+export type ClientAgentMode = 'lead' | 'voice';
+
+export interface ClientAgentConfig {
+  /** https only. Never logged in full (host only). */
+  url: string;
+  /** HMAC key for X-Tamara-Signature. Never logged. */
+  secret?: string;
+  /**
+   * 'lead': Tamara keeps her brain, the agent is the ask_client_agent tool.
+   * 'voice': every caller turn goes to the agent, its answer is spoken verbatim.
+   */
+  mode: ClientAgentMode;
+}

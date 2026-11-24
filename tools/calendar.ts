@@ -1,6 +1,7 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 
+import { logToolCall } from '../src/tool-log.js';
 import { webPost } from '../src/web-api.js';
 
 export interface ToolFeatures {
@@ -58,10 +59,107 @@ const makePost =
     console.log(`[calendar-latency] ${path} → ${res.status} ${ms}ms`);
     if (!res.ok) {
       const text = await res.text();
+      // A 4xx that carries a reason (`{ error: string, ... }`) is an answer
+      // for the model (wrong day for the centre, slot taken, invalid date):
+      // hand it back so the tool's own branches run. 401, 5xx, a non-JSON
+      // body or a JSON without `error` keep throwing exactly as before.
+      // Only an allowlisted refusal keeps its wording (see speakableRefusal);
+      // anything else reaches the model as the neutral sentinel, and the log
+      // carries the status + a code, never the body (it can name a number).
+      const reasoned = parseReasoned4xx(res.status, text);
+      if (reasoned) {
+        const kept = speakableRefusal(reasoned);
+        console.log(`[calendar] refused ${res.status} ${refusalLogCode(reasoned)}`);
+        return (kept ?? { error: NEUTRAL_REFUSAL_CODE }) as T;
+      }
       throw new Error(`${path} → HTTP ${res.status} : ${text.slice(0, 200)}`);
     }
     return (await res.json()) as T;
   };
+
+/** Parsed body of a 4xx (except 401) whose JSON has a string `error` field,
+ *  else null. Never throws. */
+export const parseReasoned4xx = (
+  status: number,
+  text: string,
+): ({ error: string } & Record<string, unknown>) | null => {
+  if (status < 400 || status >= 500 || status === 401) return null;
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const error = (body as Record<string, unknown>)['error'];
+  if (typeof error !== 'string') return null;
+  return body as { error: string } & Record<string, unknown>;
+};
+
+/** What the model hears for any refusal it cannot act on. */
+export const NEUTRAL_REFUSAL = 'Impossible pour le moment.';
+/** Code makePost puts in place of a refusal that is not allowlisted. */
+export const NEUTRAL_REFUSAL_CODE = '__neutral_refusal__';
+
+/** A run of 7+ digits looks like a phone number: never spoken. */
+const DIGIT_RUN = /\d{7,}/;
+
+/** The ONLY refusals whose wording may reach the model: the ones the caller
+ *  can act on. Matched on the web's `error` field (a code, or the French
+ *  text the web routes send for invalid / past dates). Everything else
+ *  (tenant unknown, calendar not connected, missing fields, unknown codes)
+ *  is neutral by default. The web has no 4xx for "appointment not found"
+ *  today (find answers 200 with no events), so nothing is listed for it. */
+export const SPEAKABLE_REFUSALS: readonly { name: string; test: (error: string) => boolean }[] = [
+  { name: 'wrong_day_for_center', test: (e) => e === 'wrong_day_for_center' },
+  { name: 'slot_conflict', test: (e) => e === 'slot_conflict' },
+  // lib/iso-date invalidDateError + lib/booking-request: "date invalide : …"
+  { name: 'invalid_date', test: (e) => /^date invalide : /i.test(e) },
+  // book / reschedule: "Date/heure invalide : …"
+  { name: 'invalid_datetime', test: (e) => /^Date\/heure invalide : /.test(e) },
+  // book / reschedule: "Le créneau … est déjà passé. …"
+  { name: 'past_slot', test: (e) => /^Le créneau .* est déjà passé\./.test(e) },
+  // lib/booking-request (book): "Heure invalide : … (format attendu HH:MM, …)"
+  { name: 'invalid_time', test: (e) => /^Heure invalide : /.test(e) },
+  // lib/booking-request (book): "Durée invalide : … (minutes, entier entre …)"
+  { name: 'invalid_duration', test: (e) => /^Durée invalide : /.test(e) },
+];
+
+/** The body itself when its refusal is allowlisted and nothing in it holds a
+ *  7+ digit run, else null (the caller then speaks the neutral text). */
+export const speakableRefusal = <B extends { error: string }>(body: B): B | null => {
+  if (!SPEAKABLE_REFUSALS.some((r) => r.test(body.error))) return null;
+  if (DIGIT_RUN.test(JSON.stringify(body))) return null;
+  return body;
+};
+
+/** Log-safe code for a refusal: the allowlist name, a known internal case,
+ *  a code-shaped `error`, else "unrecognized". Never the message text. */
+export const refusalLogCode = (body: { error: string }): string => {
+  const e = body.error;
+  const listed = SPEAKABLE_REFUSALS.find((r) => r.test(e));
+  if (listed) return listed.name;
+  if (/^Tenant inconnu/i.test(e)) return 'tenant_unknown';
+  if (/Google Calendar non connecté/i.test(e)) return 'calendar_not_connected';
+  if (/Google Sheet non connecté/i.test(e)) return 'sheet_not_connected';
+  if (/^[a-z][a-z0-9_]{0,63}$/.test(e) && !/\d{3,}/.test(e)) return e;
+  return 'unrecognized';
+};
+
+/** Short text for a web refusal a tool has no dedicated branch for: the
+ *  neutral text for a non-allowlisted refusal, else the web's `message`
+ *  when it is a string, else the error code (≤ 200 chars). */
+export const formatRefusal = (data: { error?: unknown; message?: unknown }): string => {
+  if (data.error === NEUTRAL_REFUSAL_CODE) return NEUTRAL_REFUSAL;
+  const reason =
+    typeof data.message === 'string' && data.message.trim()
+      ? data.message
+      : typeof data.error === 'string'
+        ? data.error
+        : 'erreur inconnue';
+  const text = `Impossible : ${reason.slice(0, 200)}`;
+  return DIGIT_RUN.test(text) ? NEUTRAL_REFUSAL : text;
+};
 
 // Centers a tenant operates (current = Prestige). Each day of the week is
 // bound to ONE centre on the server side — this enum is exposed to the LLM
@@ -75,32 +173,55 @@ const formatSuggested = (suggested?: SuggestedDate[]): string =>
     ? suggested.map((d) => `${d.weekday} ${d.date}`).join(', ')
     : '';
 
+/** /api/calendar/list-dates response. `requested_date` / `requested_date_open`
+ *  only come from a web that treats `after` as inclusive; an older web omits
+ *  them. */
+export interface ListDatesResponse {
+  center: string;
+  label: string;
+  dates: SuggestedDate[];
+  error?: string;
+  requested_date?: string;
+  requested_date_open?: boolean;
+}
+
+/** Tool output for list_available_dates. Without `requested_date_open` the
+ *  text is exactly the historical one; with it, a plain sentence about the
+ *  asked date comes first so the model can't misread the list. */
+export const formatListDates = (data: ListDatesResponse): string => {
+  if (data.error === NEUTRAL_REFUSAL_CODE) return NEUTRAL_REFUSAL;
+  if (data.error) return DIGIT_RUN.test(data.error) ? NEUTRAL_REFUSAL : `Erreur : ${data.error}`;
+  const dates = data.dates ?? [];
+  const list =
+    dates.length === 0
+      ? `Aucune date trouvée pour ${data.label}.`
+      : `Prochaines dates ouvertes à ${data.label} : ${formatSuggested(dates)}.`;
+  if (typeof data.requested_date_open !== 'boolean' || !data.requested_date) return list;
+  const verdict = data.requested_date_open
+    ? `Le ${data.requested_date} est ouvert à ${data.label}.`
+    : `Le ${data.requested_date} n'est pas ouvert à ${data.label}.`;
+  return `${verdict} ${list}`;
+};
+
 export const makeCalendarTools = (ctx: ToolContext) => {
   const post = makePost(ctx);
 
   const listAvailableDates = llm.tool({
     description:
-      "Renvoie les prochaines dates valides pour un centre donné — déterministe, source de vérité. À APPELER systématiquement avant de proposer une date à la cliente : NE devine JAMAIS quel jour de la semaine correspond à quel centre, demande ce tool. Utile aussi quand la cliente dit 'je veux Jérusalem la semaine prochaine' → tu obtiens directement les dates ouvertes.",
+      "Renvoie les prochaines dates valides pour un centre donné — déterministe, source de vérité. À APPELER systématiquement avant de proposer une date à la cliente : NE devine JAMAIS quel jour de la semaine correspond à quel centre, demande ce tool. Utile aussi quand la cliente dit 'je veux Jérusalem la semaine prochaine' → tu obtiens directement les dates ouvertes. Quand la cliente demande un jour précis (ex. 'demain'), passe `after` = CETTE date (YYYY-MM-DD) pour la vérifier : la réponse dit alors en clair « Le <date> est ouvert / n'est pas ouvert à <centre> ». Ne conclus JAMAIS qu'un jour est fermé sans cette phrase « n'est pas ouvert » OU sans avoir appelé check_availability pour ce jour — une date absente de la liste ne veut PAS dire fermé.",
     parameters: z.object({
       center: CENTER_ENUM.describe("Centre voulu par la cliente (jerusalem, ashdod, natanya)."),
       count: z.number().int().nullish().describe("Combien de prochaines dates retourner (défaut 3, max 10)."),
-      after: z.string().nullish().describe("Optionnel : YYYY-MM-DD à partir de laquelle chercher (exclusif). Sinon, à partir d'aujourd'hui."),
+      after: z.string().nullish().describe("Optionnel : YYYY-MM-DD à partir de laquelle chercher, INCLUSE — passe la date demandée par la cliente pour la vérifier. Sinon, à partir d'aujourd'hui."),
     }),
     execute: async ({ center, count, after }) => {
-      const data = await post<{
-        center: string;
-        label: string;
-        dates: SuggestedDate[];
-        error?: string;
-      }>('/api/calendar/list-dates', {
+      logToolCall('list_available_dates', { center, count, after });
+      const data = await post<ListDatesResponse>('/api/calendar/list-dates', {
         center,
         count: count ?? 3,
         after: after ?? undefined,
       });
-      if (data.error) return `Erreur : ${data.error}`;
-      const dates = data.dates ?? [];
-      if (dates.length === 0) return `Aucune date trouvée pour ${data.label}.`;
-      return `Prochaines dates ouvertes à ${data.label} : ${formatSuggested(dates)}.`;
+      return formatListDates(data);
     },
   });
 
@@ -119,6 +240,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         .describe("Durée de la prestation en minutes (60 soin de la peau, 30 épilation, défaut 30). Indispensable pour que les créneaux renvoyés tiennent vraiment."),
     }),
     execute: async ({ date, center, duration }) => {
+      logToolCall('check_availability', { date, center, duration });
       const data = await post<{
         date: string;
         center?: string;
@@ -140,6 +262,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       if (data.error === 'wrong_day_for_center') {
         return `${data.message} Propose une de ces dates à la cliente.`;
       }
+      // Any other refusal (invalid date, calendar not connected, ...).
+      if (data.error) return formatRefusal(data);
       // No slots left on this date → server gave us the next valid dates
       // for the SAME center.
       if (data.reason && data.suggested_dates) {
@@ -179,6 +303,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         .describe("Durée en minutes (60 pour soins de la peau, 30 pour épilation, défaut 30)."),
     }),
     execute: async ({ name, phone, date, time, center, description, email, duration }) => {
+      logToolCall('book_appointment', { name, phone, date, time, center, description, email, duration });
       // Fallback caller-ID si le LLM ne fournit pas phone. Évite que
       // l'agent demande au client un numéro déjà connu via Twilio.
       const resolvedPhone =
@@ -224,7 +349,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         if (data.expectedLabel) {
           return `${data.error} (Le bon centre pour le ${date} est ${data.expectedLabel}.)`;
         }
-        return `Erreur réservation : ${data.error ?? 'inconnue'}`;
+        return formatRefusal(data);
       }
 
       // Auto-save contact au CRM (Sheet) UNIQUEMENT si la feature crm est
@@ -236,7 +361,14 @@ export const makeCalendarTools = (ctx: ToolContext) => {
           phone: resolvedPhone,
           email: email ?? undefined,
           notes,
-        }).catch((e) => console.error('save_contact (auto) failed:', e));
+        })
+          .then((r) => {
+            // Personal data stays out of the log: no body, no message.
+            if (r && typeof r === 'object' && 'error' in r) {
+              console.error('save_contact (auto) refused by the web');
+            }
+          })
+          .catch((e) => console.error('save_contact (auto) failed:', e));
       }
 
       return data.summary ?? `RDV confirmé le ${date} à ${time} pour ${name}.`;
@@ -258,6 +390,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       notes: z.string().nullish().describe("Notes libres."),
     }),
     execute: async ({ name, phone, email, notes }) => {
+      logToolCall('save_contact', { name, phone, email, notes });
       const resolvedPhone =
         (phone && phone.trim().length > 0 ? phone : null) ??
         ctx.getCallerPhone?.() ??
@@ -269,7 +402,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         '/api/sheets/contact',
         { name, phone: resolvedPhone, email: email ?? undefined, notes: notes ?? undefined },
       );
-      return data.message ?? data.error ?? 'Contact enregistré.';
+      if (data.error) return formatRefusal(data);
+      return data.message ?? 'Contact enregistré.';
     },
   });
 
@@ -281,11 +415,12 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       date: z.string().nullish().describe("Optionnel : limite la recherche à cette date (YYYY-MM-DD). Sinon cherche les 30 prochains jours."),
     }),
     execute: async ({ phone, date }) => {
+      logToolCall('find_appointment', { phone, date });
       const data = await post<{
         events?: { eventId: string; summary: string; start: string; end: string }[];
         error?: string;
       }>('/api/calendar/find', { phone, date: date ?? undefined });
-      if (data.error) return `Erreur recherche : ${data.error}`;
+      if (data.error) return formatRefusal(data);
       const events = data.events ?? [];
       if (events.length === 0) return `Aucun rendez-vous trouvé pour ${phone}.`;
       return events
@@ -304,11 +439,13 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       event_id: z.string().describe("Identifiant Google Calendar de l'événement à supprimer."),
     }),
     execute: async ({ event_id }) => {
+      logToolCall('cancel_appointment', { event_id });
       const data = await post<{ success?: boolean; message?: string; error?: string }>(
         '/api/calendar/cancel',
         { eventId: event_id },
       );
-      return data.message ?? data.error ?? 'RDV annulé.';
+      if (data.error) return formatRefusal(data);
+      return data.message ?? 'RDV annulé.';
     },
   });
 
@@ -325,6 +462,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       duration: z.number().int().nullish().describe("Durée en minutes. Si omis, garde la durée actuelle."),
     }),
     execute: async ({ event_id, new_date, new_time, center, duration }) => {
+      logToolCall('reschedule_appointment', { event_id, new_date, new_time, center, duration });
       const data = await post<{
         success?: boolean;
         summary?: string;
@@ -351,7 +489,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
           'Ce créneau chevauche un rendez-vous existant. Propose une autre heure.'
         );
       }
-      return data.summary ?? data.error ?? 'RDV déplacé.';
+      if (data.error) return formatRefusal(data);
+      return data.summary ?? 'RDV déplacé.';
     },
   });
 
