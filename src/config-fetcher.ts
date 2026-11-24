@@ -95,6 +95,20 @@ export function isFallbackConfig(cfg: Pick<FetchedConfig, 'instructions'>): bool
   return cfg.instructions === FALLBACK_INSTRUCTIONS;
 }
 
+/** The languages the worker supports (STT hint, Gemini BCP-47, fixed lines). */
+export const SUPPORTED_PRIMARY_LANGUAGES = ['fr', 'he', 'en'] as const;
+export type PrimaryLanguage = (typeof SUPPORTED_PRIMARY_LANGUAGES)[number];
+
+/**
+ * `{ primaryLanguage }` when the web served a supported code, `{}` otherwise
+ * (absent, null, unknown code): the key is then absent, as it always was.
+ */
+export function primaryLanguageField(raw: unknown): { primaryLanguage?: PrimaryLanguage } {
+  return (SUPPORTED_PRIMARY_LANGUAGES as readonly unknown[]).includes(raw)
+    ? { primaryLanguage: raw as PrimaryLanguage }
+    : {};
+}
+
 const isOutbound = (o: SessionOrigin) => o.kind === 'campaign' || o.kind === 'outbound_test';
 
 /**
@@ -251,6 +265,11 @@ export async function fetchConfig(
       // log line with the reason, never the url or the secret). Absent from
       // the payload → no key at all (today's config, unchanged).
       ...clientAgentField((data as Record<string, unknown>)['clientAgent']),
+      // The account's primary language (agent_configs.primary_language).
+      // It was never copied, so every reader fell back to its own default.
+      // Only a supported code is kept; absent or anything else → no key at
+      // all, i.e. exactly today's config.
+      ...primaryLanguageField(data.primaryLanguage),
       // exactOptionalPropertyTypes refuse 'undefined' explicite ; on
       // omet la clé si vide pour ne pas planter le typing.
       ...(data.perCallContextTemplate !== undefined
