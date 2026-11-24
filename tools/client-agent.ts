@@ -10,6 +10,7 @@ import {
   type ClientAgentTurn,
 } from '../src/client-agent.js';
 import { createStallGate } from '../src/stall-gate.js';
+import type { ClientAgentReachTracker } from '../src/client-agent-reach.js';
 
 export interface ClientAgentToolDeps {
   webhook: { url: string; secret?: string };
@@ -33,6 +34,8 @@ export interface ClientAgentToolDeps {
   /** Monitoring (/api/v1/turns), one call per tool call. */
   onResult?: (r: ClientAgentResult & { turnId: number; question: string; callerSaid: string; language: string }) => void;
   ask?: typeof askClientAgent;
+  /** Connectors B3: one record per tool call (answered or not). */
+  reach?: ClientAgentReachTracker;
 }
 
 export function makeClientAgentTools(deps: ClientAgentToolDeps) {
@@ -86,6 +89,11 @@ export function makeClientAgentTools(deps: ClientAgentToolDeps) {
         (cancelStall as (() => void) | null)?.();
         console.log(`[client_agent] turn ${id} → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
         try {
+          deps.reach?.record(Boolean(result.answer));
+        } catch {
+          /* tracking never changes what the model is told */
+        }
+        try {
           deps.onResult?.({ ...result, turnId: id, question, callerSaid, language });
         } catch {
           /* monitoring never changes what the model is told */
@@ -98,6 +106,11 @@ export function makeClientAgentTools(deps: ClientAgentToolDeps) {
           (cancelStall as (() => void) | null)?.();
         } catch {
           /* holding line already gone */
+        }
+        try {
+          deps.reach?.record(false);
+        } catch {
+          /* tracking never changes what the model is told */
         }
         console.log(`[client_agent] turn ${id} → error (${(e as Error)?.name ?? 'Error'})`);
         return toolResultText({ answer: null, elapsedMs: 0, failure: 'network' });

@@ -9,6 +9,7 @@ import { stallLine } from '../src/agent-webhook.js';
 import { createVoiceTurnQueue, runClientAgentVoiceTurn, type VoiceTurnOutcome } from '../src/brain-mode.js';
 import { callerLanguageOf, createCallerTurnTracker } from '../src/caller-turn.js';
 import type { ClientAgentRequest, ClientAgentResult } from '../src/client-agent.js';
+import { createClientAgentReachTracker } from '../src/client-agent-reach.js';
 import { createStallGate, STALL_AFTER_MS } from '../src/stall-gate.js';
 import { makeClientAgentTools } from '../tools/client-agent.js';
 
@@ -246,6 +247,35 @@ mock.timers.enable({ apis: ['setTimeout'] });
     'never "ok" then "error" for the same turn',
   );
   assert.ok(b.lines.every((l) => !/error/i.test(l)));
+}
+
+// ── 6. reach (#45): a reply dropped as stale, or discarded on a closed
+// session, still counts as reached: the agent DID answer
+{
+  for (const kind of ['stale', 'closed'] as const) {
+    const reach = createClientAgentReachTracker();
+    const spoken: string[] = [];
+    const p = runClientAgentVoiceTurn({
+      endpoint: ENDPOINT, callId: CALL_ID, turnId: 1, language: 'fr', callerSaid: 'Bonjour', history: [],
+      speak: async (t) => { spoken.push(t); },
+      ask: askAfter(300), log: () => {}, reach,
+      ...(kind === 'stale' ? { isStale: () => true } : { isClosed: () => true }),
+    });
+    await flush();
+    mock.timers.tick(300);
+    assert.equal(await p, kind === 'stale' ? 'stale' : 'discarded');
+    assert.deepEqual(spoken, []);
+    assert.equal(reach.reached, true, `${kind}: not spoken, still reached`);
+  }
+  const failed = createClientAgentReachTracker();
+  const q = runClientAgentVoiceTurn({
+    endpoint: ENDPOINT, callId: CALL_ID, turnId: 1, language: 'fr', callerSaid: 'Bonjour', history: [],
+    speak: async () => {}, log: () => {}, reach: failed, isStale: () => true,
+    ask: (async () => ({ answer: null, elapsedMs: 1, failure: 'http' })) as never,
+  });
+  await flush();
+  await q;
+  assert.equal(failed.reached, false, 'no answer → not reached, stale or not');
 }
 
 mock.timers.reset();

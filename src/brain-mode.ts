@@ -30,6 +30,7 @@ import {
 } from './client-agent.js';
 import { stallLine, TURN_BUDGET_MS } from './agent-webhook.js';
 import { createStallGate, type StallGate } from './stall-gate.js';
+import type { ClientAgentReachTracker } from './client-agent-reach.js';
 import type { ClientAgentConfig, ClientAgentMode } from './types.js';
 
 export const CLIENT_AGENT_MODES: readonly ClientAgentMode[] = ['lead', 'voice'];
@@ -216,7 +217,18 @@ export async function runClientAgentVoiceTurn(p: {
   /** True when the session is closed or closing. */
   isClosed?: () => boolean;
   log?: (line: string) => void;
+  /**
+   * Connectors B3: one record per turn, true when the agent answered (even if
+   * that reply is then dropped as stale or not spoken, see below).
+   */
+  reach?: ClientAgentReachTracker;
 }): Promise<VoiceTurnOutcome> {
+  let recorded = false;
+  const record = (answered: boolean) => {
+    if (recorded) return;
+    recorded = true;
+    p.reach?.record(answered);
+  };
   const log = p.log ?? console.log;
   const gate = p.stallGate ?? createStallGate();
   const closed = () => {
@@ -269,6 +281,10 @@ export async function runClientAgentVoiceTurn(p: {
   }
   clearTimeout(stallTimer);
   gate.endTurn(stalled);
+  // Reached = the customer's agent answered. A reply dropped as stale, or not
+  // spoken because the session closed or speech failed, still counts: the
+  // agent DID answer, it is the call that moved on.
+  record(Boolean(result?.answer));
 
   if (closed()) return discarded();
   log(
@@ -313,6 +329,8 @@ export async function clientAgentOpening(p: {
   language: string;
   ask?: typeof askClientAgent;
   log?: (line: string) => void;
+  /** Connectors B3: the opening request counts as one attempt. */
+  reach?: ClientAgentReachTracker;
 }): Promise<string | null> {
   const log = p.log ?? console.log;
   try {
@@ -322,8 +340,10 @@ export async function clientAgentOpening(p: {
       { budgetMs: CLIENT_AGENT_VOICE_BUDGET_MS },
     );
     log(`[client_agent] opening → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
+    p.reach?.record(Boolean(result.answer));
     return result.answer;
   } catch (e) {
+    p.reach?.record(false);
     log(`[client_agent] opening → error (${(e as Error)?.name ?? 'Error'})`);
     return null;
   }
