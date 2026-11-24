@@ -51,7 +51,7 @@ export const SILENCE_GRACE_START_MS = 10_000;
 
 /**
  * Timeout du fetch `/api/agent/config` au début de chaque appel.
- * Au-delà : on tombe sur le fallback hardcoded (defaultConfig()).
+ * Au-delà : fallback neutre (defaultConfig(), src/fallback-persona.ts).
  */
 export const CONFIG_FETCH_TIMEOUT_MS = 5_000;
 

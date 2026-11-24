@@ -19,7 +19,7 @@ ne peut pas extraire proprement sans gros refactor.
 | **`env.ts`** | `requireEnv()` / `envOr()` — accès défensif aux variables d'environnement. |
 | **`types.ts`** | `AgentFeatures`, `FetchedConfig`, `TranscriptEntry`, `SessionOrigin`, `ProcessUserData`. Toutes les interfaces partagées. |
 | **`origin.ts`** | `detectOrigin()` + helpers `sipFromOf()`, `sipToOf()`, `webUserIdOf()`, `outboundTestOf()`. Distingue SIP Twilio (PSTN/WhatsApp), Web LiveTest, test live d'agent sortant (`outbound_test`) et campagne sortante (`campaign`, via metadata job/participant ou nom de room `campaign__…`). |
-| **`config-fetcher.ts`** | `fetchConfig(origin)` — GET `/api/agent/config` (ou `campaign-config` / `outbound-test-config` selon l'origine). `defaultConfig()` + `DEFAULT_FEATURES` en fallback failure-open. |
+| **`config-fetcher.ts`** | `fetchConfig(origin)` — GET `/api/agent/config` (ou `campaign-config` / `outbound-test-config` selon l'origine). `defaultConfig()` : agent NEUTRE qui prend un message, sans tool (src/fallback-persona.ts), signalé par `config_fallback_used` ; un appel sortant sans config est refusé (`config_unavailable`). |
 | **`web-api.ts`** | `webGet()` / `webPost()` — client HTTP centralisé worker → app web : `APP_URL`, header `x-internal-secret`, timeout. Renvoie la `Response` brute, chaque call site garde son handling. |
 | **`remote-log.ts`** | `remoteLog()` — POST `/api/events` best-effort. Mirror stdout pour Railway logs. `enterSession()`/`runWithSession()` propagent `origin` via AsyncLocalStorage. |
 | **`post-call.ts`** | `postCallEnd()` (inbound → `/api/calls/end`) et `postCampaignResult()` (campagne → `/api/agent/campaign-result`). Retry/backoff 3 tentatives, dump console du payload en dernier recours. |
