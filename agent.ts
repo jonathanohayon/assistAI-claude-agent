@@ -101,6 +101,7 @@ import type {
 } from './src/types.js';
 import { makeBusinessTools } from './tools/business.js';
 import { makeCalendarTools } from './tools/calendar.js';
+import { demoFallbackWarnings } from './src/demo-fallback-warning.js';
 import { makeClientAgentTools, type ClientAgentToolDeps } from './tools/client-agent.js';
 import {
   clientAgentOpening,
@@ -1618,17 +1619,8 @@ export default defineAgent<ProcessUserData>({
     // Bind the calendar/sheets tools to THIS tenant's dialed number so they
     // hit the right Google Calendar/Sheet on the web service. Without this,
     // the routes fall back to the admin's credentials (= cross-tenant leak).
-    const internalSecret = process.env['INTERNAL_SECRET'] ?? '';
-    if (!internalSecret) {
-      console.warn(
-        '[tools] INTERNAL_SECRET not set — calendar/sheet calls will fall back to the demo (admin) account on the web service.',
-      );
-    }
-    if (!toNumber) {
-      console.warn(
-        '[tools] dialed number unresolved — calendar/sheet calls will fall back to the demo (admin) account on the web service.',
-      );
-    }
+    // The matching warnings print after the tool maps are built, and only
+    // when one of those tools is registered (src/demo-fallback-warning.ts).
     // tenantUserId : pour web LiveTest sessions, toNumber est vide.
     // On dérive du origin.userId (résolu par detectOrigin) pour que le
     // web puisse router vers le bon Google calendar via x-tenant-user-id.
@@ -1667,6 +1659,14 @@ export default defineAgent<ProcessUserData>({
           getCallerPhone: () => toIsraeliLocal(fromNumber),
         })
       : {};
+
+    for (const line of demoFallbackWarnings({
+      tenantRoutedToolNames: [...Object.keys(calendarTools), ...Object.keys(ordersTools)],
+      internalSecret: process.env['INTERNAL_SECRET'] ?? '',
+      dialedNumber: toNumber,
+    })) {
+      console.warn(line);
+    }
 
     // Numéro de l'appelant en format local israélien (+972… → 0…) — les
     // clientes dictent/écoutent en local, les tools stockent en local.
