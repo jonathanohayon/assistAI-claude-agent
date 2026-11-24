@@ -86,6 +86,15 @@ export function defaultConfig(): FetchedConfig {
   };
 }
 
+/**
+ * True when `cfg` is the neutral fallback (not a tenant's config). The
+ * entrypoint then skips everything keyed on the dialed number that would
+ * speak as the tenant, e.g. the pre-rendered opener (src/greeting-player.ts).
+ */
+export function isFallbackConfig(cfg: Pick<FetchedConfig, 'instructions'>): boolean {
+  return cfg.instructions === FALLBACK_INSTRUCTIONS;
+}
+
 const isOutbound = (o: SessionOrigin) => o.kind === 'campaign' || o.kind === 'outbound_test';
 
 /**

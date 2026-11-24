@@ -4,8 +4,9 @@
  * /api/agent/config, including 403 trial_exhausted, answered the caller as the
  * historical "Tamara/Prestige" agent, so the trial gate never cut anything.
  *
- * Only these two explicit refusals hang up. Any other failure (5xx, timeout,
- * garbled body) keeps the defaults: an outage on our side must not drop calls.
+ * Only these two explicit refusals hang up. Any other inbound failure (5xx,
+ * timeout, garbled body) runs the neutral message-taking fallback: an outage
+ * on our side must not drop calls (src/config-fetcher.ts).
  */
 
 /**
@@ -51,8 +52,8 @@ export function configFallbackLog(
       level: 'error',
       message:
         `[config_auth_failed] ${route} → ${status}: INTERNAL_SECRET mismatch between worker and web? ` +
-        'Calls are running on the DEFAULT persona and tools until it is fixed.',
+        'Calls are running on the neutral fallback (no tools) until it is fixed.',
     };
   }
-  return { level: 'warn', message: `[config] ${route} → ${status}, using defaults` };
+  return { level: 'warn', message: `[config] ${route} → ${status}, using the neutral fallback` };
 }

@@ -25,6 +25,6 @@ assert.equal(configFallbackLog(403, '/api/agent/campaign-config?x=1').level, 'er
 // other failures stay a warning
 const outage = configFallbackLog(502, '/api/agent/config?userId=u1');
 assert.equal(outage.level, 'warn');
-assert.equal(outage.message, '[config] /api/agent/config → 502, using defaults');
+assert.equal(outage.message, '[config] /api/agent/config → 502, using the neutral fallback');
 
 console.log('ALL CONFIG-REFUSAL TESTS PASSED');

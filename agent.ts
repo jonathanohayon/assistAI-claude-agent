@@ -54,7 +54,7 @@ import type { RealtimeProvider } from './src/realtime-provider.js';
 import { reportUsage } from './src/usage-report.js';
 import { classifyRealtimeError, createFatalGate, geminiErrorCode } from './src/realtime-errors.js';
 import { reportTurn } from './src/vox-config.js';
-import { fetchConfig } from './src/config-fetcher.js';
+import { fetchConfig, isFallbackConfig } from './src/config-fetcher.js';
 import { ConfigRefusedError } from './src/config-refusal.js';
 import { deleteRoom } from './src/hangup.js';
 import {
@@ -316,7 +316,9 @@ export default defineAgent<ProcessUserData>({
     const dialedNumber =
       origin.kind === 'sip' ? origin.calledNumber : '';
     // creds APP_URL/INTERNAL_SECRET désormais injectés par src/web-api.ts
-    const openerPromise = dialedNumber
+    // Neutral fallback (config not loaded): never the tenant's pre-rendered
+    // opener — it would greet as a business the fallback knows nothing of.
+    const openerPromise = dialedNumber && !isFallbackConfig(cfg)
       ? fetchOpenerPcm(dialedNumber).catch(() => null)
       : Promise.resolve(null);
 

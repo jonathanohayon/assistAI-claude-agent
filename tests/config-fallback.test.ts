@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 
 process.env['INTERNAL_SECRET'] = 'mock';
-const { fetchConfig, FALLBACK_FEATURES } = await import('../src/config-fetcher.js');
+const { fetchConfig, FALLBACK_FEATURES, isFallbackConfig } = await import('../src/config-fetcher.js');
 const { ConfigRefusedError } = await import('../src/config-refusal.js');
 const { FALLBACK_INSTRUCTIONS, FALLBACK_GREETING } = await import('../src/fallback-persona.js');
 
@@ -42,6 +42,7 @@ const neutral = (cfg: Awaited<ReturnType<typeof fetchConfig>>, label: string) =>
   assert.deepEqual(cfg.features, FALLBACK_FEATURES, `${label}: no tools`);
   assert.equal(cfg.transferNumber, '', `${label}: no transfer`);
   assert.equal(cfg.ordersEnabled, false);
+  assert.equal(isFallbackConfig(cfg), true, `${label}: flagged as the fallback`);
 };
 const lastEvent = () => events.at(-1) as { event: string; level: string; metadata: { code: string; outbound: boolean } };
 
@@ -87,6 +88,12 @@ assert.equal(ok.instructions, 'TENANT PROMPT');
 assert.equal(ok.greetingInstructions, 'HI');
 assert.equal(ok.features.calendar, true);
 assert.equal(events.length, n);
+assert.equal(isFallbackConfig(ok), false, 'a tenant config is not the fallback');
+
+// The fallback never plays the tenant's pre-rendered opener (agent.ts).
+const { readFileSync } = await import('node:fs');
+const agentSrc = readFileSync(new URL('../agent.ts', import.meta.url), 'utf8');
+assert.match(agentSrc, /dialedNumber && !isFallbackConfig\(cfg\)\s*\?\s*fetchOpenerPcm/, 'opener gated on the fallback');
 
 console.log('ALL CONFIG-FALLBACK TESTS PASSED');
 process.exit(0);
