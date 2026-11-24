@@ -850,10 +850,15 @@ export default defineAgent<ProcessUserData>({
     // ConversationItemAdded too, but UserInputTranscribed is the canonical
     // STT-style event. Keep both, dedupe by skipping empty text.
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
-      if (!ev.isFinal) return;
+      if (!ev.isFinal) {
+        // T5c "lead": the caller's words so far, used when the tool runs
+        // before this turn's final transcript (src/caller-turn.ts).
+        callerTurns.interimTranscript(ev.transcript ?? '', ev.itemId);
+        return;
+      }
       const text = (ev.transcript ?? '').trim();
       // Before the empty check: an empty final transcript ends the turn too.
-      callerTurns.finalTranscript(text);
+      callerTurns.finalTranscript(text, ev.itemId);
       if (!text) return;
       const entry: TranscriptEntry = { role: 'user', text };
       transcript.push(entry);
@@ -1732,7 +1737,12 @@ export default defineAgent<ProcessUserData>({
             // fetchConfig does not copy the web's primaryLanguage into cfg,
             // so that default was what every "lead" call sent.
             getLanguage: callerLanguage,
-            getCallerSaid: () => callerTurns.callerSaid(),
+            getCallerSaid: async () => {
+              const said = await callerTurns.callerSaidWithSource();
+              // The source and the wait only, never the caller's words.
+              console.log(`[client_agent] caller_said from ${said.source} (waited ${said.waitedMs} ms)`);
+              return said.text;
+            },
             getHistory: () =>
               transcript.map((t) => ({ role: t.role === 'assistant' ? ('agent' as const) : ('user' as const), text: t.text })),
             startStall: () => {
