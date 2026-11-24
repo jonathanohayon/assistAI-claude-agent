@@ -215,7 +215,12 @@ const ask: typeof askClientAgent = (w, r, o = {}) =>
     language: 'en',
     question: 'What are the opening hours on Sunday?',
     caller_said: 'uh, when are you open on sunday',
-    history: [{ role: 'agent', text: 'Hello, Mock Salon.' }],
+    // The caller's words close the history even when the transcript does
+    // not hold them yet (tools/client-agent.ts withCallerTurn).
+    history: [
+      { role: 'agent', text: 'Hello, Mock Salon.' },
+      { role: 'user', text: 'uh, when are you open on sunday' },
+    ],
   });
   assert.equal(s.headers['x-tamara-signature'], createHmac('sha256', SECRET).update(s.body).digest('hex'), 'HMAC-SHA256 hex of the raw body');
   assert.equal(s.headers['content-type'], 'application/json');

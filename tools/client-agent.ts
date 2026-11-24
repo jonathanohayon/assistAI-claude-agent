@@ -38,6 +38,19 @@ export interface ClientAgentToolDeps {
   reach?: ClientAgentReachTracker;
 }
 
+/**
+ * The history sent with a "lead" request ends with the caller's words: when
+ * caller_said is not yet in the transcript (its final transcript is late, so
+ * it came from the interim text), it is added as the last user turn. Never
+ * added twice, never added when the caller said nothing.
+ */
+export function withCallerTurn(history: ClientAgentTurn[], callerSaid: string): ClientAgentTurn[] {
+  if (!callerSaid) return history;
+  const lastUser = [...history].reverse().find((t) => t.role === 'user');
+  if (lastUser && lastUser.text.trim() === callerSaid.trim()) return history;
+  return [...history, { role: 'user', text: callerSaid }];
+}
+
 export function makeClientAgentTools(deps: ClientAgentToolDeps) {
   let turnId = 0;
   const stallGate = createStallGate();
@@ -80,7 +93,7 @@ export function makeClientAgentTools(deps: ClientAgentToolDeps) {
             language,
             question,
             callerSaid,
-            history: deps.getHistory(),
+            history: withCallerTurn(deps.getHistory(), callerSaid),
           }),
         );
         clearTimeout(stallTimer);

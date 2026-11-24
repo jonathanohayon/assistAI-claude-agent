@@ -88,6 +88,8 @@ mock.timers.enable({ apis: ['setTimeout'] });
   await third;
   console.log = log;
   assert.equal(seen[2]!.caller_said, 'Vous êtes ouverts quand ?', 'bounded wait, never stuck');
+  assert.equal(turns.pending, false, 'a turn given up on is not awaited again');
+  turns.speechEnded();
   assert.equal(turns.pending, true);
   turns.finalTranscript('');
   assert.equal(turns.pending, false, 'an empty final transcript ends the turn too');
