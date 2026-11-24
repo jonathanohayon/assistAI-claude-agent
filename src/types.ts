@@ -83,6 +83,12 @@ export interface FetchedConfig {
    */
   clientAgent?: ClientAgentConfig;
   /**
+   * Connectors B3: opaque signed token served by the web on connector routes
+   * only. Never parsed nor logged by the worker; echoed back unchanged in
+   * /api/calls/end (src/client-agent-reach.ts connectorRouteField).
+   */
+  connectorRoute?: string;
+  /**
    * Prise de commandes au téléphone activée (toggle "Commandes" de la tuile
    * CRM). Quand vrai, le worker enregistre le tool `record_order`. Défaut
    * false (opt-in). Absent du payload web ancien → traité comme false.

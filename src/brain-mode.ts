@@ -29,6 +29,7 @@ import {
   type ClientAgentTurn,
 } from './client-agent.js';
 import { stallLine, TURN_BUDGET_MS } from './agent-webhook.js';
+import type { ClientAgentReachTracker } from './client-agent-reach.js';
 import type { ClientAgentConfig, ClientAgentMode } from './types.js';
 
 export const CLIENT_AGENT_MODES: readonly ClientAgentMode[] = ['lead', 'voice'];
@@ -196,7 +197,15 @@ export async function runClientAgentVoiceTurn(p: {
   ask?: typeof askClientAgent;
   stallMs?: number;
   log?: (line: string) => void;
+  /** Connectors B3: one record per turn (true once the answer was spoken). */
+  reach?: ClientAgentReachTracker;
 }): Promise<VoiceTurnOutcome> {
+  let recorded = false;
+  const record = (answered: boolean) => {
+    if (recorded) return;
+    recorded = true;
+    p.reach?.record(answered);
+  };
   const log = p.log ?? console.log;
   const stallTimer = setTimeout(() => {
     // Never awaited: the holding line must not delay the answer.
@@ -219,13 +228,16 @@ export async function runClientAgentVoiceTurn(p: {
     log(`[client_agent] voice turn ${p.turnId} → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
     if (result.answer) {
       await p.speak(result.answer);
+      record(true);
       return 'answered';
     }
+    record(false);
     await p.speak(apologyLine(p.language));
     return result.failure ?? 'shape';
   } catch (e) {
     clearTimeout(stallTimer);
     // The error name only: a message could echo the url or the caller's words.
+    record(false);
     log(`[client_agent] voice turn ${p.turnId} → error (${(e as Error)?.name ?? 'Error'})`);
     try {
       await p.speak(apologyLine(p.language));
@@ -247,6 +259,8 @@ export async function clientAgentOpening(p: {
   language: string;
   ask?: typeof askClientAgent;
   log?: (line: string) => void;
+  /** Connectors B3: the opening request counts as one attempt. */
+  reach?: ClientAgentReachTracker;
 }): Promise<string | null> {
   const log = p.log ?? console.log;
   try {
@@ -256,8 +270,10 @@ export async function clientAgentOpening(p: {
       { budgetMs: CLIENT_AGENT_VOICE_BUDGET_MS },
     );
     log(`[client_agent] opening → ${result.answer ? 'ok' : result.failure} in ${result.elapsedMs}ms`);
+    p.reach?.record(Boolean(result.answer));
     return result.answer;
   } catch (e) {
+    p.reach?.record(false);
     log(`[client_agent] opening → error (${(e as Error)?.name ?? 'Error'})`);
     return null;
   }

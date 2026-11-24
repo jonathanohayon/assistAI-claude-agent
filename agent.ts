@@ -81,6 +81,11 @@ import {
 } from './src/voice-profile.js';
 import { toIsraeliLocal } from './src/phone.js';
 import { postCallEnd, postCampaignResult } from './src/post-call.js';
+import {
+  callEndExtras,
+  clientAgentReachLogLine,
+  createClientAgentReachTracker,
+} from './src/client-agent-reach.js';
 import { createCampaignProgressReporter } from './src/campaign-progress.js';
 import { computeCallCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
@@ -277,6 +282,11 @@ export default defineAgent<ProcessUserData>({
     const webhookMode = brainPlan.kind === 'verbatim';
     const agentWebhook = brainPlan.kind === 'verbatim' ? brainPlan.endpoint : undefined;
     const clientAgentVoice = brainPlan.kind === 'verbatim' && brainPlan.contract === 'client_agent';
+    // Connectors B3: whether this call reached the T5c clientAgent, sent as
+    // `clientAgentReached` in /api/calls/end (src/client-agent-reach.ts).
+    // Only T5c lead/voice record into it: tamaravox and the legacy webhook
+    // never do, so their payloads are unchanged.
+    const clientAgentReach = createClientAgentReachTracker();
     if (voxToolMode) {
       console.log(`[client_agent] tool mode → ${toolEndpoint!.url}`);
     }
@@ -746,6 +756,7 @@ export default defineAgent<ProcessUserData>({
                 text: entry.text,
               })),
               speak: speakVerbatim,
+              reach: clientAgentReach,
             }),
           )
         : null;
@@ -982,6 +993,9 @@ export default defineAgent<ProcessUserData>({
         );
         return;
       }
+      const reached = clientAgentReach.reached;
+      const reachLine = clientAgentReachLogLine(reached, cfg.connectorRoute);
+      if (reachLine) console.log(reachLine);
       await postCallEnd(
         transcript,
         fromNumber,
@@ -990,6 +1004,7 @@ export default defineAgent<ProcessUserData>({
         origin.kind === 'sip' ? origin.channel : undefined,
         (Date.now() - sessionStartedAt) / 1000,
         engine,
+        callEndExtras(reached, cfg.connectorRoute),
       );
     };
 
@@ -1500,6 +1515,7 @@ export default defineAgent<ProcessUserData>({
             endpoint: agentWebhook,
             callId: currentCallId() ?? callIdFromRoomName(ctx.room.name ?? 'call'),
             language: cfg.primaryLanguage ?? 'fr',
+            reach: clientAgentReach,
           });
           if (answer) {
             await speakVerbatim(answer);
@@ -1688,6 +1704,8 @@ export default defineAgent<ProcessUserData>({
         ? makeClientAgentTools({
             webhook: toolEndpoint,
             getCallId: () => currentCallId() ?? 'call',
+            // T5c "lead" only: tamaravox tool calls are not tracked.
+            ...(clientAgentLead ? { reach: clientAgentReach } : {}),
             getLanguage: () => {
               const lastUser = [...transcript].reverse().find((t) => t.role === 'user');
               return lastUser && sniffLang(lastUser.text) === 'he' ? 'he' : (cfg.primaryLanguage ?? 'en');
