@@ -105,6 +105,56 @@ export async function postCampaignResult(
   console.log(`[campaign] /api/agent/campaign-result → ${res.status} ${body.slice(0, 160)}`);
 }
 
+/** Optional call-end fields; each key is sent only when defined. */
+export interface CallEndExtras {
+  /** See src/client-agent-reach.ts. undefined → key omitted. */
+  clientAgentReached?: boolean;
+  /** Opaque token served on connector routes only, echoed unchanged. undefined → key omitted. */
+  connectorRoute?: string;
+}
+
+/** The /api/calls/end body. Pure, so the exact JSON can be pinned in tests. */
+export function buildCallEndPayload(p: {
+  callId: string | undefined;
+  transcript: TranscriptEntry[];
+  fromNumber: string;
+  toNumber: string;
+  userId?: string;
+  channel?: CallChannel;
+  durationSeconds?: number;
+  engine?: { provider: string; model: string };
+  extras?: CallEndExtras;
+}) {
+  return {
+    callId: p.callId,
+    fromNumber: p.fromNumber,
+    toNumber: p.toNumber,
+    transcript: p.transcript,
+    // Omettre `userId` si undefined plutôt qu'envoyer null —
+    // /api/calls/end fait son routing tenant en cascade.
+    ...(p.userId ? { userId: p.userId } : {}),
+    // Canal SIP : conditionne le mode d'envoi du recap client côté web.
+    ...(p.channel ? { channel: p.channel } : {}),
+    // Real wall-clock duration. calls.duration_seconds was 0 on every row
+    // because this was never sent; billing graphs and Finance read it.
+    ...(p.durationSeconds !== undefined
+      ? { durationSeconds: Math.max(0, Math.round(p.durationSeconds)) }
+      : {}),
+    // Engine that took the call, stored per call by the web (Monitoring
+    // shows the model; Finance prices per provider).
+    ...(p.engine ? { realtimeProvider: p.engine.provider, realtimeModel: p.engine.model } : {}),
+    // Connectors B3: only when defined, so a call with no clientAgent and no
+    // connector sends exactly the payload it sent before.
+    ...(p.extras?.clientAgentReached !== undefined ? { clientAgentReached: p.extras.clientAgentReached } : {}),
+    ...(p.extras?.connectorRoute ? { connectorRoute: p.extras.connectorRoute } : {}),
+  };
+}
+
+/** The payload as it may be logged: the opaque connector token is masked. */
+export function redactForLog<T extends { connectorRoute?: string }>(payload: T): T {
+  return payload.connectorRoute ? { ...payload, connectorRoute: '[redacted]' } : payload;
+}
+
 /**
  * POST le transcript + métadonnées à `/api/calls/end`.
  *
@@ -128,6 +178,7 @@ export async function postCallEnd(
   channel?: CallChannel,
   durationSeconds?: number,
   engine?: { provider: string; model: string },
+  extras?: CallEndExtras,
 ): Promise<void> {
   const appUrl = process.env['APP_URL'];
   const secret = process.env['INTERNAL_SECRET'];
@@ -142,30 +193,23 @@ export async function postCallEnd(
     return;
   }
 
-  const payload = {
+  const payload = buildCallEndPayload({
     callId: currentCallId(),
+    transcript,
     fromNumber,
     toNumber,
-    transcript,
-    // Omettre `userId` si undefined plutôt qu'envoyer null —
-    // /api/calls/end fait son routing tenant en cascade.
     ...(userId ? { userId } : {}),
-    // Canal SIP : conditionne le mode d'envoi du recap client côté web.
     ...(channel ? { channel } : {}),
-    // Real wall-clock duration. calls.duration_seconds was 0 on every row
-    // because this was never sent; billing graphs and Finance read it.
-    ...(durationSeconds !== undefined
-      ? { durationSeconds: Math.max(0, Math.round(durationSeconds)) }
-      : {}),
-    // Engine that took the call, stored per call by the web (Monitoring
-    // shows the model; Finance prices per provider).
-    ...(engine ? { realtimeProvider: engine.provider, realtimeModel: engine.model } : {}),
-  };
+    ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+    ...(engine ? { engine } : {}),
+    ...(extras ? { extras } : {}),
+  });
   const res = await fetchWithRetry('[recap]', '/api/calls/end', payload);
   if (!res) {
     console.error(
       '[post-call] PERTE DE DONNÉES — payload pour recovery manuelle:',
-      JSON.stringify(payload),
+      // The connector token is never logged, even in the recovery dump.
+      JSON.stringify(redactForLog(payload)),
     );
     return;
   }

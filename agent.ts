@@ -65,6 +65,8 @@ import {
 import { describeOpenAiKey, resolveOpenAiKey } from './src/openai-key.js';
 import { fetchOpenerPcm, pcmToFrameStream } from './src/greeting-player.js';
 import { sniffLang } from './src/lang-sniff.js';
+import { callerLanguageOf, createCallerTurnTracker } from './src/caller-turn.js';
+import { createStallGate } from './src/stall-gate.js';
 import { detectOrigin, sipFromOf, sipToOf } from './src/origin.js';
 import { startHeartbeat } from './src/heartbeat.js';
 import { buildPerCallContext, buildSessionInstructions } from './src/per-call-context.js';
@@ -81,6 +83,11 @@ import {
 } from './src/voice-profile.js';
 import { toIsraeliLocal } from './src/phone.js';
 import { postCallEnd, postCampaignResult } from './src/post-call.js';
+import {
+  callEndExtras,
+  clientAgentReachLogLine,
+  createClientAgentReachTracker,
+} from './src/client-agent-reach.js';
 import { createCampaignProgressReporter } from './src/campaign-progress.js';
 import { computeCallCostUsd } from './src/pricing.js';
 import { probeRegionsAtStartup } from './src/region-probe.js';
@@ -94,6 +101,7 @@ import type {
 } from './src/types.js';
 import { makeBusinessTools } from './tools/business.js';
 import { makeCalendarTools } from './tools/calendar.js';
+import { demoFallbackWarnings } from './src/demo-fallback-warning.js';
 import { makeClientAgentTools, type ClientAgentToolDeps } from './tools/client-agent.js';
 import {
   clientAgentOpening,
@@ -277,6 +285,11 @@ export default defineAgent<ProcessUserData>({
     const webhookMode = brainPlan.kind === 'verbatim';
     const agentWebhook = brainPlan.kind === 'verbatim' ? brainPlan.endpoint : undefined;
     const clientAgentVoice = brainPlan.kind === 'verbatim' && brainPlan.contract === 'client_agent';
+    // Connectors B3: whether this call reached the T5c clientAgent, sent as
+    // `clientAgentReached` in /api/calls/end (src/client-agent-reach.ts).
+    // Only T5c lead/voice record into it: tamaravox and the legacy webhook
+    // never do, so their payloads are unchanged.
+    const clientAgentReach = createClientAgentReachTracker();
     if (voxToolMode) {
       console.log(`[client_agent] tool mode → ${toolEndpoint!.url}`);
     }
@@ -679,11 +692,18 @@ export default defineAgent<ProcessUserData>({
 
     // ── Transcript capture ──────────────────────────────────────────────
     const transcript: TranscriptEntry[] = [];
-    /** T5c: the caller's language for the customer's agent (Hebrew sniffed, else the tenant's). */
-    const callerLanguage = (): string => {
-      const lastUser = [...transcript].reverse().find((t) => t.role === 'user');
-      return lastUser && sniffLang(lastUser.text) === 'he' ? 'he' : (cfg.primaryLanguage ?? 'fr');
-    };
+    /**
+     * T5c: the caller's language for the customer's agent (Hebrew sniffed,
+     * else the tenant's). The one source for "lead" and "voice".
+     */
+    const callerLanguage = (): string =>
+      callerLanguageOf([...transcript].reverse().find((t) => t.role === 'user')?.text, cfg.primaryLanguage);
+    /** T5c "lead": the caller's last final transcript, awaited when still in flight. */
+    const callerTurns = createCallerTurnTracker();
+    /** T5c: the session is closed or closing; a finishing turn says nothing. */
+    let voiceSessionClosed = false;
+    const isSessionClosed = (): boolean =>
+      voiceSessionClosed || (session as unknown as { _closing?: boolean })._closing === true;
     // État du mode BYO-agent : un tour à la fois, numérotés pour les logs.
     let webhookTurnInFlight = false;
     let webhookTurnId = 0;
@@ -732,9 +752,10 @@ export default defineAgent<ProcessUserData>({
      * is sent right after it instead of being dropped. History is read when
      * the turn is actually sent, so it includes every turn said meanwhile.
      */
+    const voiceStallGate = createStallGate();
     const clientAgentVoiceQueue =
       clientAgentVoice && agentWebhook
-        ? createVoiceTurnQueue((callerSaid, turnId) =>
+        ? createVoiceTurnQueue((callerSaid, turnId, turn) =>
             runClientAgentVoiceTurn({
               endpoint: agentWebhook,
               callId: currentCallId() ?? callIdFromRoomName(ctx.room.name ?? 'call'),
@@ -746,10 +767,21 @@ export default defineAgent<ProcessUserData>({
                 text: entry.text,
               })),
               speak: speakVerbatim,
+              stallGate: voiceStallGate,
+              isStale: turn.isStale,
+              isClosed: isSessionClosed,
+              reach: clientAgentReach,
             }),
           )
         : null;
-    session.once(voice.AgentSessionEventTypes.Close, () => clientAgentVoiceQueue?.stop());
+    session.once(voice.AgentSessionEventTypes.Close, () => {
+      voiceSessionClosed = true;
+      clientAgentVoiceQueue?.stop();
+    });
+    // The caller stopped speaking: its final transcript is on its way.
+    session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
+      if ((ev as { oldState?: string }).oldState === 'speaking') callerTurns.speechEnded();
+    });
     let fromNumber = '';
     let toNumber = origin.kind === 'sip' ? origin.calledNumber : '';
     let recapSent = false;
@@ -820,6 +852,8 @@ export default defineAgent<ProcessUserData>({
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
       if (!ev.isFinal) return;
       const text = (ev.transcript ?? '').trim();
+      // Before the empty check: an empty final transcript ends the turn too.
+      callerTurns.finalTranscript(text);
       if (!text) return;
       const entry: TranscriptEntry = { role: 'user', text };
       transcript.push(entry);
@@ -982,6 +1016,9 @@ export default defineAgent<ProcessUserData>({
         );
         return;
       }
+      const reached = clientAgentReach.reached;
+      const reachLine = clientAgentReachLogLine(reached, cfg.connectorRoute);
+      if (reachLine) console.log(reachLine);
       await postCallEnd(
         transcript,
         fromNumber,
@@ -990,6 +1027,7 @@ export default defineAgent<ProcessUserData>({
         origin.kind === 'sip' ? origin.channel : undefined,
         (Date.now() - sessionStartedAt) / 1000,
         engine,
+        callEndExtras(reached, cfg.connectorRoute),
       );
     };
 
@@ -1500,6 +1538,7 @@ export default defineAgent<ProcessUserData>({
             endpoint: agentWebhook,
             callId: currentCallId() ?? callIdFromRoomName(ctx.room.name ?? 'call'),
             language: cfg.primaryLanguage ?? 'fr',
+            reach: clientAgentReach,
           });
           if (answer) {
             await speakVerbatim(answer);
@@ -1580,17 +1619,8 @@ export default defineAgent<ProcessUserData>({
     // Bind the calendar/sheets tools to THIS tenant's dialed number so they
     // hit the right Google Calendar/Sheet on the web service. Without this,
     // the routes fall back to the admin's credentials (= cross-tenant leak).
-    const internalSecret = process.env['INTERNAL_SECRET'] ?? '';
-    if (!internalSecret) {
-      console.warn(
-        '[tools] INTERNAL_SECRET not set — calendar/sheet calls will fall back to the demo (admin) account on the web service.',
-      );
-    }
-    if (!toNumber) {
-      console.warn(
-        '[tools] dialed number unresolved — calendar/sheet calls will fall back to the demo (admin) account on the web service.',
-      );
-    }
+    // The matching warnings print after the tool maps are built, and only
+    // when one of those tools is registered (src/demo-fallback-warning.ts).
     // tenantUserId : pour web LiveTest sessions, toNumber est vide.
     // On dérive du origin.userId (résolu par detectOrigin) pour que le
     // web puisse router vers le bon Google calendar via x-tenant-user-id.
@@ -1629,6 +1659,14 @@ export default defineAgent<ProcessUserData>({
           getCallerPhone: () => toIsraeliLocal(fromNumber),
         })
       : {};
+
+    for (const line of demoFallbackWarnings({
+      tenantRoutedToolNames: [...Object.keys(calendarTools), ...Object.keys(ordersTools)],
+      internalSecret: process.env['INTERNAL_SECRET'] ?? '',
+      dialedNumber: toNumber,
+    })) {
+      console.warn(line);
+    }
 
     // Numéro de l'appelant en format local israélien (+972… → 0…) — les
     // clientes dictent/écoutent en local, les tools stockent en local.
@@ -1688,11 +1726,13 @@ export default defineAgent<ProcessUserData>({
         ? makeClientAgentTools({
             webhook: toolEndpoint,
             getCallId: () => currentCallId() ?? 'call',
-            getLanguage: () => {
-              const lastUser = [...transcript].reverse().find((t) => t.role === 'user');
-              return lastUser && sniffLang(lastUser.text) === 'he' ? 'he' : (cfg.primaryLanguage ?? 'en');
-            },
-            getCallerSaid: () => [...transcript].reverse().find((t) => t.role === 'user')?.text ?? '',
+            // T5c "lead" only: tamaravox tool calls are not tracked.
+            ...(clientAgentLead ? { reach: clientAgentReach } : {}),
+            // The same language as "voice", never an "en" default: today
+            // fetchConfig does not copy the web's primaryLanguage into cfg,
+            // so that default was what every "lead" call sent.
+            getLanguage: callerLanguage,
+            getCallerSaid: () => callerTurns.callerSaid(),
             getHistory: () =>
               transcript.map((t) => ({ role: t.role === 'assistant' ? ('agent' as const) : ('user' as const), text: t.text })),
             startStall: () => {
@@ -1705,22 +1745,21 @@ export default defineAgent<ProcessUserData>({
                 return null;
               }
               let cancelled = false;
-              let handle: { interrupt: () => void } | null = null;
-              const line = stallLine(cfg.primaryLanguage ?? 'en');
+              const language = callerLanguage();
+              const line = stallLine(language);
               void tts
-                .speak(line, { voice: cfg.voice, language: cfg.primaryLanguage ?? 'en', ...(cfg.speed ? { speed: cfg.speed } : {}) })
+                .speak(line, { voice: cfg.voice, language, ...(cfg.speed ? { speed: cfg.speed } : {}) })
                 .then((audio) => {
-                  if (cancelled) return;
-                  handle = session.say(line, { audio, addToChatCtx: false });
+                  if (cancelled || isSessionClosed()) return;
+                  session.say(line, { audio, addToChatCtx: false });
                 })
                 .catch((e) => console.warn(`[client_agent] holding line failed: ${(e as Error).message}`));
+              // The answer arrived: a line not started yet is never said; one
+              // already playing finishes, and the model's answer, scheduled
+              // after it on the same speech queue, follows it (no overlap,
+              // no cut-off line).
               return () => {
                 cancelled = true;
-                try {
-                  handle?.interrupt();
-                } catch {
-                  /* already played */
-                }
               };
             },
             ...(voxToolMode ? { onResult: (r: Parameters<NonNullable<ClientAgentToolDeps['onResult']>>[0]) =>

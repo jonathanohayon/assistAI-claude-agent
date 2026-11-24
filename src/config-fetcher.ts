@@ -36,6 +36,7 @@ import { voxBrainInstructions } from './vox-brain.js';
 import { webGet } from './web-api.js';
 import { parseClientProfile } from './client-profile.js';
 import { clientAgentField } from './brain-mode.js';
+import { connectorRouteField } from './client-agent-reach.js';
 
 /**
  * Permissif par défaut — si le fetch échoue ou si l'admin n'a pas encore
@@ -251,6 +252,9 @@ export async function fetchConfig(
       // log line with the reason, never the url or the secret). Absent from
       // the payload → no key at all (today's config, unchanged).
       ...clientAgentField((data as Record<string, unknown>)['clientAgent']),
+      // Connectors B3: opaque token, served on connector routes only; echoed
+      // unchanged in /api/calls/end. Non-string → absent. Never logged.
+      ...connectorRouteField((data as Record<string, unknown>)['connectorRoute']),
       // exactOptionalPropertyTypes refuse 'undefined' explicite ; on
       // omet la clé si vide pour ne pas planter le typing.
       ...(data.perCallContextTemplate !== undefined
