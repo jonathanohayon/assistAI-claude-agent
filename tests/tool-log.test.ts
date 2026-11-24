@@ -102,20 +102,21 @@ const cal = makeCalendarTools({
   dialedPhone: '+15550000000',
   tenantUserId: '',
   getCallerPhone: () => '0521234567',
+  places: [{ id: 'loc_1', name: 'Mock Place' }],
 });
 
 nextResponse = { center: 'jerusalem', label: 'Jérusalem', dates: [] };
 assertOneLine(
-  await capture(() => run(cal.list_available_dates, { center: 'jerusalem', count: 3, after: '2026-11-24' })),
+  await capture(() => run(cal.list_available_dates, { location_id: 'loc_1', count: 3, after: '2026-11-24' })),
   'list_available_dates',
-  { center: 'jerusalem', count: 3, after: '2026-11-24' },
+  { location_id: 'loc_1', count: 3, after: '2026-11-24' },
 );
 
 nextResponse = { date: '2026-11-24', label: 'Jérusalem', available_slots: ['10:00'] };
 assertOneLine(
-  await capture(() => run(cal.check_availability, { date: '2026-11-24', center: 'jerusalem', duration: 60 })),
+  await capture(() => run(cal.check_availability, { date: '2026-11-24', location_id: 'loc_1', duration: 60 })),
   'check_availability',
-  { date: '2026-11-24', center: 'jerusalem', duration: 60 },
+  { date: '2026-11-24', location_id: 'loc_1', duration: 60 },
 );
 
 nextResponse = { success: true, summary: 'ok' };
@@ -127,14 +128,14 @@ assertOneLine(
       phone: '+972521234567',
       date: '2026-11-24',
       time: '10:00',
-      center: 'jerusalem',
+      location_id: 'loc_1',
       description: 'soin du visage',
       email: 'dana@example.com',
       duration: 60,
     }),
   ),
   'book_appointment',
-  { date: '2026-11-24', time: '10:00', center: 'jerusalem', duration: 60 },
+  { date: '2026-11-24', time: '10:00', location_id: 'loc_1', duration: 60 },
 );
 // the log line is written before the HTTP call (the call itself still happens)
 assert.ok(fetchBodies.length >= 1);
@@ -169,12 +170,12 @@ assertOneLine(
       event_id: 'evt_abc123',
       new_date: '2026-11-25',
       new_time: '11:30',
-      center: 'natanya',
+      location_id: 'loc_1',
       duration: 30,
     }),
   ),
   'reschedule_appointment',
-  { event_id: 'evt_abc123', new_date: '2026-11-25', new_time: '11:30', center: 'natanya', duration: 30 },
+  { event_id: 'evt_abc123', new_date: '2026-11-25', new_time: '11:30', location_id: 'loc_1', duration: 30 },
 );
 
 const orders = makeOrdersTools({ dialedPhone: '+15550000000', tenantUserId: '', getCallerPhone: () => '0521234567' });
@@ -262,12 +263,12 @@ assert.equal(formatListDates({ ...base, requested_date_open: true }), 'Prochaine
 nextResponse = { ...base, requested_date: '2026-11-24', requested_date_open: true };
 let out = '';
 await capture(async () => {
-  out = await run(cal.list_available_dates, { center: 'jerusalem', after: '2026-11-24' });
+  out = await run(cal.list_available_dates, { after: '2026-11-24' });
 });
 assert.equal(out, 'Le 2026-11-24 est ouvert à Jérusalem. Prochaines dates ouvertes à Jérusalem : mardi 2026-11-24.');
 nextResponse = base;
 await capture(async () => {
-  out = await run(cal.list_available_dates, { center: 'jerusalem' });
+  out = await run(cal.list_available_dates, {});
 });
 assert.equal(out, 'Prochaines dates ouvertes à Jérusalem : mardi 2026-11-24.');
 

@@ -78,7 +78,7 @@ const findCentre = (
 ): BusinessCentre | null => {
   const exact = business.centres.find((c) => c.id === centreId);
   if (exact) return exact;
-  // Fallback : match insensible par nom (le LLM peut passer "Jerusalem"
+  // Fallback : match insensible par nom (le LLM peut passer le nom du centre
   // au lieu de l'id `ctr_xyz`). Best-effort. `c.name ?? ''` : lecture
   // défensive sur payload partiel (C3).
   const lower = centreId.toLowerCase().trim();
@@ -158,7 +158,7 @@ export function makeBusinessTools(
       parameters: z.object({
         centreId: z
           .string()
-          .describe("L'id du centre (ex: ctr_abc) OU le nom (ex: 'Jerusalem')."),
+          .describe("L'id du centre (ex: ctr_abc) OU le nom (tel que list_centres le donne)."),
       }),
       execute: async ({ centreId }) => {
         logToolCall('get_centre_info', { centreId });
@@ -210,7 +210,7 @@ export function makeBusinessTools(
   if (hasServices) {
     tools['list_services'] = llm.tool({
       description:
-        "Liste les soins / prestations dispo (nom, durée, prix). Tu peux filtrer par centre via centreId, sinon tout le catalogue est renvoyé. Utilise ce tool quand le client demande 'qu'est-ce que vous proposez', 'quels services', etc.",
+        "Liste les prestations dispo (nom, durée, prix). Tu peux filtrer par centre via centreId, sinon tout le catalogue est renvoyé. Utilise ce tool quand le client demande 'qu'est-ce que vous proposez', 'quels services', etc.",
       parameters: z.object({
         centreId: z
           .string()
@@ -222,19 +222,19 @@ export function makeBusinessTools(
         const matched = servicesForCentre(business, centreId);
         if (matched.length === 0) {
           return centreId
-            ? `Aucun soin disponible pour ce centre.`
-            : `Aucun soin défini.`;
+            ? `Aucune prestation disponible pour ce centre.`
+            : `Aucune prestation définie.`;
         }
         const lines = matched.map(
           (s, i) => `${i + 1}. ${formatService(s, business)}`,
         );
-        return `Soins disponibles${centreId ? ` (centre ${centreId})` : ''} :\n${lines.join('\n')}`;
+        return `Prestations disponibles${centreId ? ` (centre ${centreId})` : ''} :\n${lines.join('\n')}`;
       },
     });
 
     tools['find_service'] = llm.tool({
       description:
-        "Recherche textuelle floue dans les noms et descriptions de soins. Use case : le client dit 'je veux un massage' ou 'lifting', tu cherches le soin correspondant pour confirmer prix/durée avant de proposer.",
+        "Recherche textuelle floue dans les noms et descriptions des prestations. Use case : le client nomme ce qu'il veut, tu cherches la prestation correspondante pour confirmer prix/durée avant de proposer.",
       parameters: z.object({
         query: z.string().describe("Texte de recherche (insensible à la casse, partial match)."),
         centreId: z
@@ -254,10 +254,10 @@ export function makeBusinessTools(
             (s.description ?? '').toLowerCase().includes(q),
         );
         if (matches.length === 0) {
-          return `Aucun soin ne matche "${query}"${centreId ? ` au centre ${centreId}` : ''}. Appelle list_services pour voir tout le catalogue.`;
+          return `Aucune prestation ne matche "${query}"${centreId ? ` au centre ${centreId}` : ''}. Appelle list_services pour voir tout le catalogue.`;
         }
         const lines = matches.map((s) => formatService(s, business));
-        return `${matches.length} soin(s) trouvé(s) pour "${query}" :\n${lines.join('\n')}`;
+        return `${matches.length} prestation(s) trouvée(s) pour "${query}" :\n${lines.join('\n')}`;
       },
     });
   }

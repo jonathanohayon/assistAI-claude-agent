@@ -29,7 +29,6 @@ import * as xai from '@livekit/agents-plugin-xai';
 // model "quailVfS" (5.3 MB, même fenêtre 15ms).
 import { audioEnhancement } from '@livekit/plugins-ai-coustics';
 import { RoomEvent } from '@livekit/rtc-node';
-import { z } from 'zod';
 
 import {
   REALTIME_CONFIG,
@@ -103,6 +102,7 @@ import {
   urlHost,
 } from './src/brain-mode.js';
 import { makeOrdersTools } from './tools/orders.js';
+import { END_CALL_SPEC, TRANSFER_CALL_SPEC } from './tools/call-control.js';
 
 export default defineAgent<ProcessUserData>({
   // Silero VAD désactivé : en Realtime mode, OpenAI gère server_vad pour
@@ -1277,14 +1277,7 @@ export default defineAgent<ProcessUserData>({
         session.on(voice.AgentSessionEventTypes.AgentStateChanged, onState);
       });
     const transferCallTool = llm.tool({
-      description:
-        "Transfers the caller to a person at the business (the owner or the team). Use it ONLY when the caller explicitly asks to speak to a person, or when you really can't help. Call this tool FIRST, without saying anything before it; its result tells you what to say next. Never call end_call after a transfer.",
-      parameters: z.object({
-        reason: z
-          .string()
-          .nullish()
-          .describe("Short reason: 'caller_asked_for_person', 'cannot_help', 'complaint', 'urgent'."),
-      }),
+      ...TRANSFER_CALL_SPEC,
       execute: async ({ reason }) => {
         logToolCall('transfer_call', { reason });
         const why = (reason ?? 'caller_asked_for_person').trim() || 'caller_asked_for_person';
@@ -1335,16 +1328,7 @@ export default defineAgent<ProcessUserData>({
     });
 
     const endCallTool = llm.tool({
-      description:
-        "Termine l'appel et raccroche. À appeler UNIQUEMENT dans le MÊME tour de parole où tu viens de dire au revoir À VOIX HAUTE, EN UNE SEULE PHRASE COURTE et DANS LA LANGUE DU CLIENT — et seulement quand la conversation est réellement finie : RDV pris/annulé/déplacé, info donnée et plus rien à demander, le client dit au revoir ou demande à raccrocher, ou silence persistant après une relance. Ne PAS appeler en plein milieu d'un échange ni pendant une simple pause ; si le client reparle pendant que tu conclus, n'appelle PAS end_call et reprends la conversation. Garde le au revoir COURT : un au revoir long ou bavard augmente le risque que ce raccroché soit perdu et que la ligne reste ouverte. APRÈS end_call, NE GÉNÈRE PLUS AUCUNE PAROLE — la ligne se ferme, tout son émis sera coupé.",
-      parameters: z.object({
-        reason: z
-          .string()
-          .nullish()
-          .describe(
-            "Raison courte du raccroché : 'appointment_booked', 'appointment_cancelled', 'appointment_rescheduled', 'information_given', 'client_requested_hangup', 'no_response', 'voicemail'.",
-          ),
-      }),
+      ...END_CALL_SPEC,
       execute: async ({ reason }) => {
         logToolCall('end_call', { reason });
         const r = (reason ?? 'llm_end').trim() || 'llm_end';
@@ -1616,6 +1600,11 @@ export default defineAgent<ProcessUserData>({
         calendar: cfg.features.calendar !== false,
         crm: cfg.features.crm !== false,
       },
+      // The business's own places resolve the tools' optional location_id.
+      // They reach the worker only once the web serves `business`; until
+      // then this is empty and every request carries `location: null`.
+      // resolveLocation drops entries without a usable name.
+      places: Array.isArray(cfg.business?.centres) ? cfg.business.centres : [],
     });
 
     // Tool de prise de commandes — enregistré UNIQUEMENT si le tenant a activé

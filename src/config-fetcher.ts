@@ -20,6 +20,7 @@ import {
 } from './constants.js';
 import type {
   AgentFeatures,
+  BusinessConfig,
   FetchedConfig,
   SessionOrigin,
 } from './types.js';
@@ -115,6 +116,14 @@ async function fallback(origin: SessionOrigin, code: FallbackCode, detail: strin
   );
   if (outbound) throw new ConfigRefusedError('config_unavailable');
   return defaultConfig();
+}
+
+/** `{ business }` when the payload's value is an object with a `centres`
+ *  array, else `{}` (no key). Pure, exported for tests. */
+export function businessField(v: unknown): { business?: BusinessConfig } {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  if (!Array.isArray((v as Record<string, unknown>)['centres'])) return {};
+  return { business: v as BusinessConfig };
 }
 
 /**
@@ -251,6 +260,10 @@ export async function fetchConfig(
       // log line with the reason, never the url or the secret). Absent from
       // the payload → no key at all (today's config, unchanged).
       ...clientAgentField((data as Record<string, unknown>)['clientAgent']),
+      // The business's places (booking tools' location_id, business tools).
+      // Strictly inert until the web serves it: copied only when it is an
+      // object with a `centres` array; otherwise no key at all (today's cfg).
+      ...businessField((data as Record<string, unknown>)['business']),
       // exactOptionalPropertyTypes refuse 'undefined' explicite ; on
       // omet la clé si vide pour ne pas planter le typing.
       ...(data.perCallContextTemplate !== undefined
