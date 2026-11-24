@@ -42,13 +42,13 @@ const TRANSFER_REASONS = [
  */
 export const TOOL_LOG_ALLOWLIST: Readonly<Record<string, readonly AllowRule[]>> = {
   // tools/calendar.ts
-  list_available_dates: ['center', 'count', 'after'],
-  check_availability: ['date', 'center', 'duration'],
-  book_appointment: ['date', 'time', 'center', 'duration'],
+  list_available_dates: ['location_id', 'count', 'after'],
+  check_availability: ['date', 'location_id', 'duration'],
+  book_appointment: ['date', 'time', 'location_id', 'duration'],
   save_contact: [],
   find_appointment: ['date'],
   cancel_appointment: ['event_id'],
-  reschedule_appointment: ['event_id', 'new_date', 'new_time', 'center', 'duration'],
+  reschedule_appointment: ['event_id', 'new_date', 'new_time', 'location_id', 'duration'],
   // tools/orders.ts
   record_order: ['quantity', 'center'],
   // tools/business.ts

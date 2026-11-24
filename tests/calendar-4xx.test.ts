@@ -46,8 +46,8 @@ const cal = makeCalendarTools({
   getCallerPhone: () => '+15550000001',
 });
 
-const BOOK_ARGS = { name: 'Mock Client', date: '2026-12-01', time: '10:00', center: 'ashdod', duration: 30 };
-const RESCHEDULE_ARGS = { event_id: 'evt_mock1', new_date: '2026-12-01', new_time: '10:00', center: 'ashdod' };
+const BOOK_ARGS = { name: 'Mock Client', date: '2026-12-01', time: '10:00', duration: 30 };
+const RESCHEDULE_ARGS = { event_id: 'evt_mock1', new_date: '2026-12-01', new_time: '10:00' };
 
 const WRONG_DAY = {
   error: 'wrong_day_for_center',
@@ -132,9 +132,9 @@ const NEUTRAL = 'Impossible pour le moment.';
 assert.equal(NEUTRAL_REFUSAL, NEUTRAL);
 
 answer(400, { error: 'date requise (YYYY-MM-DD)' });
-assert.equal(await run(cal.check_availability, { date: '', center: 'ashdod', duration: 30 }), NEUTRAL);
+assert.equal(await run(cal.check_availability, { date: '', duration: 30 }), NEUTRAL);
 answer(400, { error: 'center invalide. Valeurs : jerusalem, ashdod, natanya' });
-assert.equal(await run(cal.list_available_dates, { center: 'ashdod' }), NEUTRAL);
+assert.equal(await run(cal.list_available_dates, {}), NEUTRAL);
 answer(400, { error: 'Téléphone requis' });
 assert.equal(await run(cal.find_appointment, { phone: '' }), NEUTRAL);
 answer(400, { error: 'eventId requis' });
@@ -150,8 +150,8 @@ for (const [tool, args] of [
   [cal.reschedule_appointment, RESCHEDULE_ARGS],
   [cal.find_appointment, { phone: '+15550000002' }],
   [cal.cancel_appointment, { event_id: 'evt_mock1' }],
-  [cal.check_availability, { date: '2026-12-01', center: 'ashdod' }],
-  [cal.list_available_dates, { center: 'ashdod' }],
+  [cal.check_availability, { date: '2026-12-01' }],
+  [cal.list_available_dates, {}],
 ] as const) {
   answer(404, { error: 'Tenant inconnu pour +15550000001' });
   assert.equal(await run(tool, args), NEUTRAL);
@@ -172,8 +172,8 @@ const ALL_TOOLS = [
   [cal.reschedule_appointment, RESCHEDULE_ARGS],
   [cal.find_appointment, { phone: '+15550000001' }],
   [cal.cancel_appointment, { event_id: 'evt_mock1' }],
-  [cal.check_availability, { date: '2026-12-01', center: 'ashdod' }],
-  [cal.list_available_dates, { center: 'ashdod' }],
+  [cal.check_availability, { date: '2026-12-01' }],
+  [cal.list_available_dates, {}],
   [cal.save_contact, { name: 'Mock Client' }],
 ] as const;
 for (let i = 0; i < 20; i++) {
@@ -232,7 +232,7 @@ assert.equal(
 );
 answer(400, { error: 'date invalide : 2026-02-30 (YYYY-MM-DD attendu)' });
 assert.equal(
-  await run(cal.list_available_dates, { center: 'ashdod' }),
+  await run(cal.list_available_dates, {}),
   'Erreur : date invalide : 2026-02-30 (YYYY-MM-DD attendu)',
 );
 const PAST = 'Le créneau 2026-01-05 10:00 est déjà passé. Propose un horaire futur.';
@@ -306,7 +306,7 @@ await expectThrow(
   BOOK_ARGS,
   '/api/calendar/book',
 );
-await expectThrow(400, 'x'.repeat(300), cal.list_available_dates, { center: 'ashdod' }, '/api/calendar/list-dates');
+await expectThrow(400, 'x'.repeat(300), cal.list_available_dates, {}, '/api/calendar/list-dates');
 
 // ---- 2xx → unchanged ----
 
@@ -319,14 +319,14 @@ assert.ok(urls.some((u) => u.endsWith('/api/sheets/contact')));
 
 answer(200, { date: '2026-12-07', label: 'Ashdod', available_slots: ['10:00', '11:00'] });
 assert.equal(
-  await run(cal.check_availability, { date: '2026-12-07', center: 'ashdod', duration: 30 }),
+  await run(cal.check_availability, { date: '2026-12-07', duration: 30 }),
   'Le 2026-12-07 (centre Ashdod), créneaux libres : 10:00, 11:00',
 );
 // availability's own 200 wrong_day_for_center keeps its branch
 answer(200, { ...WRONG_DAY, date: '2026-12-01' });
 assert.equal(
-  await run(cal.check_availability, { date: '2026-12-01', center: 'ashdod' }),
-  'Ashdod est ouvert le lundi uniquement. Propose une de ces dates à la cliente.',
+  await run(cal.check_availability, { date: '2026-12-01' }),
+  'Ashdod est ouvert le lundi uniquement. Propose une de ces dates à la personne.',
 );
 answer(200, { success: true, summary: 'RDV déplacé au 2026-12-07.' });
 assert.equal(await run(cal.reschedule_appointment, RESCHEDULE_ARGS), 'RDV déplacé au 2026-12-07.');
@@ -338,7 +338,7 @@ answer(200, { success: true, message: 'Contact enregistré.' });
 assert.equal(await run(cal.save_contact, { name: 'Mock Client' }), 'Contact enregistré.');
 answer(200, { center: 'ashdod', label: 'Ashdod', dates: [{ date: '2026-12-07', weekday: 'lundi' }] });
 assert.equal(
-  await run(cal.list_available_dates, { center: 'ashdod' }),
+  await run(cal.list_available_dates, {}),
   'Prochaines dates ouvertes à Ashdod : lundi 2026-12-07.',
 );
 

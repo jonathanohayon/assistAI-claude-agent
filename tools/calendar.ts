@@ -33,7 +33,59 @@ export interface ToolContext {
   /** Plan features renvoyées par /api/agent/config. Pilotent quels tools
    *  sont enregistrés. Si non fourni : tout activé (legacy). */
   features?: ToolFeatures;
+  /** The business's own places (cfg.business.centres from the session
+   *  config). Resolves the optional `location_id` the booking tools take.
+   *  Absent / empty = the business has no listed place. */
+  places?: readonly BookingPlace[];
 }
+
+/** One of the business's places, as the session config lists it. */
+export interface BookingPlace {
+  id: string;
+  name: string;
+}
+
+/** What the model hears when it names a place the business doesn't have. */
+export const UNKNOWN_PLACE =
+  'Lieu inconnu : demandez à la personne lequel de nos lieux elle souhaite.';
+
+export type PlaceResolution = { ok: true; location: string | null } | { ok: false; message: string };
+
+/**
+ * `location_id` → the `location` sent to the web. Pure.
+ *   - a known id (or the exact place name, case-insensitive) → that place's name;
+ *   - exactly one place → its name (an omitted or unknown id changes nothing);
+ *   - no place → null;
+ *   - two or more places: an unknown id → UNKNOWN_PLACE (no request is sent);
+ *     an omitted id → null, unless `requireWhenSeveral` (booking: the place
+ *     must be chosen) → UNKNOWN_PLACE.
+ */
+export const resolveLocation = (
+  rawPlaces: readonly BookingPlace[] | undefined,
+  locationId: string | null | undefined,
+  opts: { requireWhenSeveral?: boolean } = {},
+): PlaceResolution => {
+  // Defensive: a partial payload may hold entries without a usable name.
+  const places = (Array.isArray(rawPlaces) ? rawPlaces : []).filter(
+    (p): p is BookingPlace => !!p && typeof p.name === 'string' && p.name.trim().length > 0,
+  );
+  const id = typeof locationId === 'string' ? locationId.trim() : '';
+  if (id) {
+    const lower = id.toLowerCase();
+    const hit =
+      places.find((p) => p.id === id) ?? places.find((p) => p.name.trim().toLowerCase() === lower);
+    if (hit) return { ok: true, location: hit.name.trim() };
+  }
+  if (places.length === 0) return { ok: true, location: null };
+  if (places.length === 1) return { ok: true, location: places[0]!.name.trim() };
+  if (id || opts.requireWhenSeveral) return { ok: false, message: UNKNOWN_PLACE };
+  return { ok: true, location: null };
+};
+
+const LOCATION_ID_DESCRIPTION =
+  "The id of one of the business's places (from list_centres / get_centre_info). Omit it when the business has only one place.";
+const DURATION_DESCRIPTION =
+  'Duration in minutes: pass the duration of the chosen service, from find_service.';
 
 const makePost =
   (ctx: ToolContext) =>
@@ -161,11 +213,6 @@ export const formatRefusal = (data: { error?: unknown; message?: unknown }): str
   return DIGIT_RUN.test(text) ? NEUTRAL_REFUSAL : text;
 };
 
-// Centers a tenant operates (current = Prestige). Each day of the week is
-// bound to ONE centre on the server side — this enum is exposed to the LLM
-// so it commits to a centre when querying or booking.
-const CENTER_ENUM = z.enum(['jerusalem', 'ashdod', 'natanya']);
-
 type SuggestedDate = { date: string; weekday: string };
 
 const formatSuggested = (suggested?: SuggestedDate[]): string =>
@@ -177,8 +224,11 @@ const formatSuggested = (suggested?: SuggestedDate[]): string =>
  *  only come from a web that treats `after` as inclusive; an older web omits
  *  them. */
 export interface ListDatesResponse {
-  center: string;
-  label: string;
+  /** Legacy web: the weekday centre and its label. */
+  center?: string;
+  label?: string;
+  /** Web that accepts `location`: the place echoed back (null = none). */
+  location?: string | null;
   dates: SuggestedDate[];
   error?: string;
   requested_date?: string;
@@ -192,32 +242,43 @@ export const formatListDates = (data: ListDatesResponse): string => {
   if (data.error === NEUTRAL_REFUSAL_CODE) return NEUTRAL_REFUSAL;
   if (data.error) return DIGIT_RUN.test(data.error) ? NEUTRAL_REFUSAL : `Erreur : ${data.error}`;
   const dates = data.dates ?? [];
+  const place = data.label || (typeof data.location === 'string' ? data.location : '');
+  const at = place ? ` à ${place}` : '';
   const list =
     dates.length === 0
-      ? `Aucune date trouvée pour ${data.label}.`
-      : `Prochaines dates ouvertes à ${data.label} : ${formatSuggested(dates)}.`;
+      ? place
+        ? `Aucune date trouvée pour ${place}.`
+        : 'Aucune date trouvée.'
+      : `Prochaines dates ouvertes${at} : ${formatSuggested(dates)}.`;
   if (typeof data.requested_date_open !== 'boolean' || !data.requested_date) return list;
   const verdict = data.requested_date_open
-    ? `Le ${data.requested_date} est ouvert à ${data.label}.`
-    : `Le ${data.requested_date} n'est pas ouvert à ${data.label}.`;
+    ? `Le ${data.requested_date} est ouvert${at}.`
+    : `Le ${data.requested_date} n'est pas ouvert${at}.`;
   return `${verdict} ${list}`;
 };
 
 export const makeCalendarTools = (ctx: ToolContext) => {
   const post = makePost(ctx);
 
+  const places = ctx.places;
+
   const listAvailableDates = llm.tool({
     description:
-      "Renvoie les prochaines dates valides pour un centre donné — déterministe, source de vérité. À APPELER systématiquement avant de proposer une date à la cliente : NE devine JAMAIS quel jour de la semaine correspond à quel centre, demande ce tool. Utile aussi quand la cliente dit 'je veux Jérusalem la semaine prochaine' → tu obtiens directement les dates ouvertes. Quand la cliente demande un jour précis (ex. 'demain'), passe `after` = CETTE date (YYYY-MM-DD) pour la vérifier : la réponse dit alors en clair « Le <date> est ouvert / n'est pas ouvert à <centre> ». Ne conclus JAMAIS qu'un jour est fermé sans cette phrase « n'est pas ouvert » OU sans avoir appelé check_availability pour ce jour — une date absente de la liste ne veut PAS dire fermé.",
+      "Renvoie les prochaines dates ouvertes — déterministe, source de vérité. À APPELER avant de proposer une date : ne devine JAMAIS quels jours sont ouverts. Quand la personne demande un jour précis (ex. 'demain'), passe `after` = CETTE date (YYYY-MM-DD) pour la vérifier : la réponse dit alors en clair « Le <date> est ouvert / n'est pas ouvert ». Ne conclus JAMAIS qu'un jour est fermé sans cette phrase « n'est pas ouvert » OU sans avoir appelé check_availability pour ce jour — une date absente de la liste ne veut PAS dire fermé.",
     parameters: z.object({
-      center: CENTER_ENUM.describe("Centre voulu par la cliente (jerusalem, ashdod, natanya)."),
+      location_id: z.string().nullish().describe(LOCATION_ID_DESCRIPTION),
       count: z.number().int().nullish().describe("Combien de prochaines dates retourner (défaut 3, max 10)."),
-      after: z.string().nullish().describe("Optionnel : YYYY-MM-DD à partir de laquelle chercher, INCLUSE — passe la date demandée par la cliente pour la vérifier. Sinon, à partir d'aujourd'hui."),
+      after: z.string().nullish().describe("Optionnel : YYYY-MM-DD à partir de laquelle chercher, INCLUSE — passe la date demandée pour la vérifier. Sinon, à partir d'aujourd'hui."),
     }),
-    execute: async ({ center, count, after }) => {
-      logToolCall('list_available_dates', { center, count, after });
+    execute: async ({ location_id, count, after }) => {
+      logToolCall('list_available_dates', { location_id, count, after });
+      const place = resolveLocation(places, location_id);
+      if (!place.ok) return place.message;
+      // Against a web that predates the `location` shape on list-dates, this
+      // answers 400 "center invalide…": not allowlisted, so the model only
+      // hears NEUTRAL_REFUSAL (makePost + formatListDates), never the text.
       const data = await post<ListDatesResponse>('/api/calendar/list-dates', {
-        center,
+        location: place.location,
         count: count ?? 3,
         after: after ?? undefined,
       });
@@ -227,20 +288,16 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const checkAvailability = llm.tool({
     description:
-      "Vérifie les créneaux disponibles pour une date + centre précis. PASSE la durée de la prestation (60 pour soin de la peau, 30 pour épilation) : un créneau n'est renvoyé que si la prestation ENTIÈRE y tient sans chevauchement. Si la date ne matche pas le centre, l'API renvoie suggested_dates avec les prochaines dates valides — utilise-les directement. Si tu ne sais pas quelle date proposer, appelle d'abord list_available_dates(center).",
+      "Vérifie les créneaux disponibles pour une date précise. PASSE la durée de la prestation choisie (celle de find_service) : un créneau n'est renvoyé que si la prestation ENTIÈRE y tient sans chevauchement. Si l'API renvoie suggested_dates, utilise-les directement. Si tu ne sais pas quelle date proposer, appelle d'abord list_available_dates.",
     parameters: z.object({
       date: z.string().describe("Date au format YYYY-MM-DD (ex: 2026-05-12)."),
-      center: CENTER_ENUM.nullish().describe(
-        "Centre demandé par la cliente. Optionnel — laisse vide pour laisser l'API déterminer le centre du jour.",
-      ),
-      duration: z
-        .number()
-        .int()
-        .nullish()
-        .describe("Durée de la prestation en minutes (60 soin de la peau, 30 épilation, défaut 30). Indispensable pour que les créneaux renvoyés tiennent vraiment."),
+      location_id: z.string().nullish().describe(LOCATION_ID_DESCRIPTION),
+      duration: z.number().int().nullish().describe(DURATION_DESCRIPTION),
     }),
-    execute: async ({ date, center, duration }) => {
-      logToolCall('check_availability', { date, center, duration });
+    execute: async ({ date, location_id, duration }) => {
+      logToolCall('check_availability', { date, location_id, duration });
+      const place = resolveLocation(places, location_id);
+      if (!place.ok) return place.message;
       const data = await post<{
         date: string;
         center?: string;
@@ -252,15 +309,19 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         suggested_dates?: SuggestedDate[];
         open_label_that_day?: string;
         requested_center?: string;
+        location?: string | null;
       }>('/api/calendar/availability', {
         date,
-        center: center ?? undefined,
+        // The `location` key (string or null) puts the web on its new path:
+        // lib/booking-place.ts isNewShape is `"location" in body`, on the
+        // old web too, so no weekday rule applies. `center` is never sent.
+        location: place.location,
         duration: duration ?? 30,
       });
       // Wrong day for requested center → server already gave us the next
       // valid dates for that center. Surface them to the LLM verbatim.
       if (data.error === 'wrong_day_for_center') {
-        return `${data.message} Propose une de ces dates à la cliente.`;
+        return `${data.message} Propose une de ces dates à la personne.`;
       }
       // Any other refusal (invalid date, calendar not connected, ...).
       if (data.error) return formatRefusal(data);
@@ -269,41 +330,44 @@ export const makeCalendarTools = (ctx: ToolContext) => {
       if (data.reason && data.suggested_dates) {
         return `${data.reason}`;
       }
+      const label = data.label || (typeof data.location === 'string' ? data.location : '');
       if (data.reason) {
-        return `${data.reason} Veux-tu un créneau à ${data.label} le ${date} ?`;
+        return label ? `${data.reason} Veux-tu un créneau à ${label} le ${date} ?` : data.reason;
       }
       const slots = data.available_slots ?? [];
-      if (slots.length === 0) return `Aucun créneau disponible le ${date} à ${data.label}.`;
-      return `Le ${date} (centre ${data.label}), créneaux libres : ${slots.join(', ')}`;
+      if (slots.length === 0) {
+        return label ? `Aucun créneau disponible le ${date} à ${label}.` : `Aucun créneau disponible le ${date}.`;
+      }
+      // Legacy web (label): its text, unchanged. Location shape: the place.
+      return label
+        ? `Le ${date} (${data.label ? `centre ${label}` : label}), créneaux libres : ${slots.join(', ')}`
+        : `Le ${date}, créneaux libres : ${slots.join(', ')}`;
     },
   });
 
   const bookAppointment = llm.tool({
     description:
-      "Réserve un rendez-vous dans Google Calendar. AVANT d'appeler : prénom, date, heure, prestation, et déduis le centre depuis la date (LUNDI=Ashdod, MERCREDI=Natanya, autres jours=Jérusalem). Le téléphone est OPTIONNEL — par défaut on prend le numéro de l'appelant (caller ID Twilio). Ne demande JAMAIS le téléphone si tu n'as pas besoin de le récupérer manuellement.",
+      "Réserve un rendez-vous dans Google Calendar. AVANT d'appeler : prénom, date, heure, prestation, et le lieu si l'entreprise en a plusieurs. Le téléphone est OPTIONNEL — par défaut on prend le numéro de l'appelant (caller ID Twilio). Ne demande JAMAIS le téléphone, sauf s'il faut le récupérer manuellement.",
     parameters: z.object({
       name: z.string().describe("Nom complet du client."),
       phone: z
         .string()
         .nullish()
         .describe(
-          "Téléphone OPTIONNEL. Laisse vide / null pour utiliser le caller-ID Twilio (recommandé). Ne fournir QUE si la cliente t'a dicté un AUTRE numéro (par ex. tel de sa mère).",
+          "Téléphone OPTIONNEL. Laisse vide / null pour utiliser le caller-ID Twilio (recommandé). Ne fournir QUE si la personne t'a dicté un AUTRE numéro (par ex. tel d'un proche).",
         ),
       date: z.string().describe("Date au format YYYY-MM-DD."),
-      time: z.string().describe("Heure au format HH:MM (24h)."),
-      center: CENTER_ENUM.describe(
-        "Centre obligatoire — déduis-le du jour de la semaine : LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem.",
-      ),
-      description: z.string().nullish().describe("Objet du rendez-vous (ex: 'soin du visage', 'épilation')."),
+      time: z.string().describe("Heure au format HH:MM (ex. 14:30)."),
+      location_id: z.string().nullish().describe(LOCATION_ID_DESCRIPTION),
+      description: z.string().nullish().describe("Objet du rendez-vous : la prestation choisie."),
       email: z.string().nullish().describe("Email du client (optionnel)."),
-      duration: z
-        .number()
-        .int()
-        .nullish()
-        .describe("Durée en minutes (60 pour soins de la peau, 30 pour épilation, défaut 30)."),
+      duration: z.number().int().nullish().describe(DURATION_DESCRIPTION),
     }),
-    execute: async ({ name, phone, date, time, center, description, email, duration }) => {
-      logToolCall('book_appointment', { name, phone, date, time, center, description, email, duration });
+    execute: async ({ name, phone, date, time, location_id, description, email, duration }) => {
+      logToolCall('book_appointment', { name, phone, date, time, location_id, description, email, duration });
+      // With several places a booking must name one: ask, send nothing.
+      const place = resolveLocation(places, location_id, { requireWhenSeveral: true });
+      if (!place.ok) return place.message;
       // Fallback caller-ID si le LLM ne fournit pas phone. Évite que
       // l'agent demande au client un numéro déjà connu via Twilio.
       const resolvedPhone =
@@ -311,7 +375,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         ctx.getCallerPhone?.() ??
         '';
       if (!resolvedPhone) {
-        return "Erreur : aucun numéro de téléphone fourni et caller-ID indisponible (numéro masqué). Demande à la cliente son numéro pour finaliser la réservation.";
+        return "Erreur : aucun numéro de téléphone fourni et caller-ID indisponible (numéro masqué). Demande à la personne son numéro pour finaliser la réservation.";
       }
       const data = await post<{
         success?: boolean;
@@ -325,7 +389,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         phone: resolvedPhone,
         date,
         time,
-        center,
+        // Always the `location` key, never `center` (see check_availability).
+        location: place.location,
         description: description ?? undefined,
         email: email ?? undefined,
         duration: duration ?? 30,
@@ -345,9 +410,6 @@ export const makeCalendarTools = (ctx: ToolContext) => {
             data.message ??
             "Ce créneau chevauche un rendez-vous existant. Propose une autre heure."
           );
-        }
-        if (data.expectedLabel) {
-          return `${data.error} (Le bon centre pour le ${date} est ${data.expectedLabel}.)`;
         }
         return formatRefusal(data);
       }
@@ -377,14 +439,14 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const saveContact = llm.tool({
     description:
-      "Enregistre un contact dans le CRM (Google Sheet). Le téléphone est OPTIONNEL — par défaut on prend le caller-ID Twilio. Ne demande pas le téléphone à la cliente si on l'a déjà via l'appel.",
+      "Enregistre un contact dans le CRM (Google Sheet). Le téléphone est OPTIONNEL — par défaut on prend le caller-ID Twilio. Ne demande pas le téléphone à la personne si on l'a déjà via l'appel.",
     parameters: z.object({
       name: z.string().describe("Nom complet."),
       phone: z
         .string()
         .nullish()
         .describe(
-          "Téléphone OPTIONNEL. Laisse vide pour utiliser le caller-ID Twilio. Ne fournir que si la cliente t'a dicté un autre numéro.",
+          "Téléphone OPTIONNEL. Laisse vide pour utiliser le caller-ID Twilio. Ne fournir que si la personne t'a dicté un autre numéro.",
         ),
       email: z.string().nullish().describe("Email (optionnel)."),
       notes: z.string().nullish().describe("Notes libres."),
@@ -396,7 +458,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         ctx.getCallerPhone?.() ??
         '';
       if (!resolvedPhone) {
-        return "Erreur : aucun numéro fourni et caller-ID indisponible. Demande à la cliente son numéro.";
+        return "Erreur : aucun numéro fourni et caller-ID indisponible. Demande à la personne son numéro.";
       }
       const data = await post<{ success?: boolean; message?: string; error?: string }>(
         '/api/sheets/contact',
@@ -451,18 +513,18 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const rescheduleAppointment = llm.tool({
     description:
-      "Déplace un rendez-vous existant à une nouvelle date/heure. Utilise l'eventId de find_appointment. Déduis le centre de la NOUVELLE date (LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem) — déplacer vers un autre jour peut changer de centre.",
+      "Déplace un rendez-vous existant à une nouvelle date/heure. Utilise l'eventId de find_appointment. Ne passe location_id que si la personne change aussi de lieu.",
     parameters: z.object({
       event_id: z.string().describe("Identifiant Google Calendar de l'événement."),
       new_date: z.string().describe("Nouvelle date (YYYY-MM-DD)."),
-      new_time: z.string().describe("Nouvelle heure (HH:MM, 24h)."),
-      center: CENTER_ENUM.nullish().describe(
-        "Centre attendu pour la nouvelle date — déduis-le du jour (LUNDI=ashdod, MERCREDI=natanya, autres=jerusalem). Optionnel : laisse vide pour laisser l'API calculer.",
-      ),
+      new_time: z.string().describe("Nouvelle heure (HH:MM, ex. 14:30)."),
+      location_id: z.string().nullish().describe(LOCATION_ID_DESCRIPTION),
       duration: z.number().int().nullish().describe("Durée en minutes. Si omis, garde la durée actuelle."),
     }),
-    execute: async ({ event_id, new_date, new_time, center, duration }) => {
-      logToolCall('reschedule_appointment', { event_id, new_date, new_time, center, duration });
+    execute: async ({ event_id, new_date, new_time, location_id, duration }) => {
+      logToolCall('reschedule_appointment', { event_id, new_date, new_time, location_id, duration });
+      const place = resolveLocation(places, location_id);
+      if (!place.ok) return place.message;
       const data = await post<{
         success?: boolean;
         summary?: string;
@@ -474,7 +536,8 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         eventId: event_id,
         newDate: new_date,
         newTime: new_time,
-        center: center ?? undefined,
+        // Always the `location` key, never `center`; null keeps the place.
+        location: place.location,
         duration: duration ?? undefined,
       });
       // Mauvais centre pour le jour → l'API renvoie les prochaines dates valides.
@@ -496,13 +559,13 @@ export const makeCalendarTools = (ctx: ToolContext) => {
 
   const takeMessage = llm.tool({
     description:
-      "À utiliser quand la cliente NE veut PAS prendre de RDV mais veut laisser un message au proprio (ex: 'dis-lui que…', 'peux-tu lui transmettre que…', 'rappelle-moi'). Envoie le message immédiatement par WhatsApp au proprio. Le numéro de la cliente est attaché automatiquement (pas besoin de le passer). Confirme à la cliente que le message a été transmis avant de raccrocher.",
+      "À utiliser quand la personne NE veut PAS prendre de RDV mais veut laisser un message au proprio (ex: 'dis-lui que…', 'peux-tu lui transmettre que…', 'rappelle-moi'). Envoie le message immédiatement par WhatsApp au proprio. Le numéro de la personne est attaché automatiquement (inutile de le passer). Confirme à la personne que le message a été transmis avant de raccrocher.",
     parameters: z.object({
       message: z.string().describe("Message complet à transmettre au proprio, formulé clairement (français/hébreu, peu importe — le proprio comprend les deux)."),
       caller_name: z
         .string()
         .nullish()
-        .describe("Prénom de la cliente si elle l'a donné. Optionnel."),
+        .describe("Prénom de la personne si elle l'a donné. Optionnel."),
     }),
     execute: async ({ message, caller_name }) => {
       const phone = ctx.getCallerPhone?.() ?? '';
@@ -515,7 +578,7 @@ export const makeCalendarTools = (ctx: ToolContext) => {
         },
       );
       if (!data.ok) return `Erreur WhatsApp : ${data.error ?? 'inconnue'}`;
-      return `Message transmis au proprio par WhatsApp.${phone ? ` Numéro de la cliente joint : ${phone}.` : ''}`;
+      return `Message transmis au proprio par WhatsApp.${phone ? ` Numéro de la personne joint : ${phone}.` : ''}`;
     },
   });
 

@@ -40,7 +40,7 @@ export const makeOrdersTools = (ctx: OrdersToolContext) => {
       center: z
         .string()
         .nullish()
-        .describe('Centre / point de retrait si pertinent (optionnel).'),
+        .describe('Lieu / point de retrait si pertinent (optionnel).'),
     }),
     execute: async ({ item, quantity, description, name, center }) => {
       logToolCall('record_order', { item, quantity, description, name, center });
